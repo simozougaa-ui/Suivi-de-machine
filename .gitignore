@@ -1,0 +1,18 @@
+# Identifiants
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+
+# Modèles téléchargés par ultralytics
+*.pt
+
+# Divers
+.DS_Store

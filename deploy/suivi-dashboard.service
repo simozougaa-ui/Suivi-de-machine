@@ -1,0 +1,15 @@
+[Unit]
+Description=Tableau de bord web du suivi de machine
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mbelkhayat
+WorkingDirectory=/home/mbelkhayat/suivi-de-machine
+ExecStart=/home/mbelkhayat/suivi-de-machine/.venv/bin/python3 dashboard.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

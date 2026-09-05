@@ -1,4 +1,4 @@
-"""Connexion au flux RTSP du DVR Hikvision et lecture continue des images.
+"""Connexion au flux RTSP du DVR Dahua et lecture continue des images.
 
 Les identifiants et l'adresse du DVR sont lus depuis les variables
 d'environnement (voir .env.example) — jamais en dur dans le code.
@@ -47,7 +47,7 @@ def build_rtsp_url():
             "renseignez les valeurs (voir README.md)."
         )
 
-    return f"rtsp://{user}:{password}@{ip}:{port}/Streaming/Channels/{channel}"
+    return f"rtsp://{user}:{password}@{ip}:{port}/cam/realmonitor?channel={channel}&subtype=0"
 
 
 def _safe_url_for_logs(url):

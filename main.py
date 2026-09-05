@@ -23,9 +23,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Zone de travail, en pixels, calibrée sur l'image réelle de la caméra
-# (voir calibrate_zone.py pour regénérer une image de calibration avec grille).
-WORK_ZONE = Zone(x1=200, y1=150, x2=600, y2=450)
+# Zone de travail, en pixels, calibrée le 2026-09-05 sur calibrate_day.png
+# (machine où l'opérateur charge la palette, caméra 15).
+WORK_ZONE = Zone(x1=100, y1=200, x2=700, y2=300)
 MACHINE_NAME = os.getenv("MACHINE_NAME", "Machine 1")
 SESSIONS_FILE = "sessions.csv"
 

@@ -13,7 +13,13 @@ logger = logging.getLogger(__name__)
 
 MODEL_NAME = "yolov8n.pt"
 PERSON_CLASS_ID = 0  # classe "person" dans le jeu COCO utilisé par YOLOv8
-DEFAULT_CONFIDENCE_THRESHOLD = 0.5
+DEFAULT_CONFIDENCE_THRESHOLD = 0.3
+# Par defaut, ultralytics redimensionne l'image a 640px avant inference, ce
+# qui retrecit encore des personnes deja petites (camera en hauteur, grand
+# angle sur tout l'atelier). Garder une taille proche de la resolution
+# source (1280x720) ameliore la detection des personnes eloignees/petites,
+# au prix d'un calcul un peu plus lent.
+DEFAULT_IMAGE_SIZE = 1280
 
 _model = None
 
@@ -32,7 +38,7 @@ def load_model():
     return _model
 
 
-def detect_persons(frame, confidence_threshold=DEFAULT_CONFIDENCE_THRESHOLD):
+def detect_persons(frame, confidence_threshold=DEFAULT_CONFIDENCE_THRESHOLD, image_size=DEFAULT_IMAGE_SIZE):
     """Détecte les personnes présentes dans une image.
 
     Args:
@@ -40,6 +46,9 @@ def detect_persons(frame, confidence_threshold=DEFAULT_CONFIDENCE_THRESHOLD):
             typiquement issue de cv2.VideoCapture.read()).
         confidence_threshold: seuil de confiance minimum pour retenir une
             détection.
+        image_size: taille (en pixels) a laquelle l'image est redimensionnee
+            avant inference. Plus grand = meilleure detection des personnes
+            petites/eloignees, mais calcul plus lent.
 
     Returns:
         Une liste de dicts: {"bbox": (x1, y1, x2, y2), "confidence": float}
@@ -51,6 +60,7 @@ def detect_persons(frame, confidence_threshold=DEFAULT_CONFIDENCE_THRESHOLD):
         verbose=False,
         classes=[PERSON_CLASS_ID],
         conf=confidence_threshold,
+        imgsz=image_size,
     )
 
     persons = []

@@ -43,13 +43,14 @@ def log_session(start, end):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--debut", required=True, help="Heure de debut, format HH:MM:SS (jour meme)")
+    parser.add_argument("--debut", required=True, help="Heure de debut, format HH:MM:SS")
     parser.add_argument("--duree", type=int, default=600, help="Duree a rejouer, en secondes (defaut 600 = 10 min)")
+    parser.add_argument("--date", default=None, help="Date a lire, format YYYY-MM-DD (defaut: aujourd'hui)")
     args = parser.parse_args()
 
-    today = datetime.now().date()
+    jour = datetime.strptime(args.date, "%Y-%m-%d").date() if args.date else datetime.now().date()
     heure = datetime.strptime(args.debut, "%H:%M:%S").time()
-    start = datetime.combine(today, heure)
+    start = datetime.combine(jour, heure)
     end = start + timedelta(seconds=args.duree)
 
     url = build_rtsp_playback_url(start, end)

@@ -36,13 +36,14 @@ def draw_grid(frame):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--heure", default="13:00:00", help="Heure a lire, format HH:MM:SS (jour meme)")
+    parser.add_argument("--heure", default="13:00:00", help="Heure a lire, format HH:MM:SS")
     parser.add_argument("--duree", type=int, default=10, help="Duree de la fenetre lue, en secondes")
+    parser.add_argument("--date", default=None, help="Date a lire, format YYYY-MM-DD (defaut: aujourd'hui)")
     args = parser.parse_args()
 
-    today = datetime.now().date()
+    jour = datetime.strptime(args.date, "%Y-%m-%d").date() if args.date else datetime.now().date()
     heure = datetime.strptime(args.heure, "%H:%M:%S").time()
-    start = datetime.combine(today, heure)
+    start = datetime.combine(jour, heure)
     end = start + timedelta(seconds=args.duree)
 
     url = build_rtsp_playback_url(start, end)

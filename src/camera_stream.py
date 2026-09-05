@@ -50,6 +50,47 @@ def build_rtsp_url():
     return f"rtsp://{user}:{password}@{ip}:{port}/cam/realmonitor?channel={channel}&subtype=0"
 
 
+def build_rtsp_playback_url(start, end):
+    """Construit l'URL RTSP de lecture des enregistrements (pas le direct).
+
+    Args:
+        start, end: objets datetime délimitant la fenêtre à lire dans les
+            enregistrements du DVR.
+
+    Le format `/cam/playback` est spécifique à Dahua (différent de
+    `/cam/realmonitor` utilisé pour le flux en direct).
+    """
+    ip = os.getenv("DVR_IP")
+    user = os.getenv("DVR_USER")
+    password = os.getenv("DVR_PASSWORD")
+    port = os.getenv("DVR_PORT", "554")
+    channel = os.getenv("CAMERA_CHANNEL")
+
+    missing = [
+        name
+        for name, value in (
+            ("DVR_IP", ip),
+            ("DVR_USER", user),
+            ("DVR_PASSWORD", password),
+            ("CAMERA_CHANNEL", channel),
+        )
+        if not value
+    ]
+    if missing:
+        raise RuntimeError(
+            "Variables d'environnement manquantes: "
+            f"{', '.join(missing)}. Copiez .env.example vers .env et "
+            "renseignez les valeurs (voir README.md)."
+        )
+
+    fmt = "%Y_%m_%d_%H_%M_%S"
+    return (
+        f"rtsp://{user}:{password}@{ip}:{port}/cam/playback?"
+        f"channel={channel}&subtype=0&starttime={start.strftime(fmt)}"
+        f"&endtime={end.strftime(fmt)}"
+    )
+
+
 def _safe_url_for_logs(url):
     """Retourne l'URL RTSP sans les identifiants, pour les logs."""
     return url.split("@")[-1] if "@" in url else url

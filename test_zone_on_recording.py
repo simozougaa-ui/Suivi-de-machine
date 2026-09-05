@@ -20,7 +20,7 @@ from src.camera_stream import build_rtsp_playback_url, open_stream
 from src.detection import detect_persons
 from src.zone import Zone
 
-WORK_ZONE = Zone(x1=480, y1=0, x2=900, y2=300)
+WORK_ZONE = Zone(x1=620, y1=100, x2=900, y2=280)
 OUTPUT_FILE = "sessions_test.csv"
 ABSENCE_TOLERANCE_SECONDS = 8
 

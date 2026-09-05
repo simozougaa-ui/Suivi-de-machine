@@ -4,8 +4,11 @@ Point d'entrée réel du projet (lancé par le service systemd suivi-presence,
 voir deploy/). L'ancien src/main.py était la version écrite avant réception
 du matériel ; celui-ci le remplace une fois le Jetson en conditions réelles.
 
-Chaque passage de "absent" à "présent" démarre une session ; chaque retour à
-"absent" la clôture et l'ajoute à sessions.csv, lu par dashboard.py.
+Chaque passage de "absent" à "présent" démarre une session. La session
+n'est clôturée qu'après ABSENCE_TOLERANCE_SECONDS d'absence continue (pas
+à la moindre image manquée) — sans cette tolérance, une seule image où la
+détection rate coupe la session en plein milieu d'une vraie présence,
+produisant des durées de 0,1s au lieu de la durée réelle.
 """
 
 import csv
@@ -28,6 +31,7 @@ logger = logging.getLogger(__name__)
 WORK_ZONE = Zone(x1=500, y1=150, x2=700, y2=300)
 MACHINE_NAME = os.getenv("MACHINE_NAME", "Machine 1")
 SESSIONS_FILE = "sessions.csv"
+ABSENCE_TOLERANCE_SECONDS = 3
 
 
 def check_presence(frame, zone):
@@ -47,8 +51,8 @@ def log_session(start, end):
 
 def main():
     logger.info("Demarrage du suivi de presence...")
-    was_present = False
     session_start = None
+    last_present_time = None
     try:
         for frame in frames():
             timestamp = datetime.now()
@@ -62,15 +66,21 @@ def main():
             status = "present" if present else "absent"
             print(f"[{timestamp.strftime('%Y-%m-%d %H:%M:%S')}] {status}")
 
-            if present and not was_present:
-                session_start = timestamp
-                logger.info("Debut de session detecte.")
-            elif not present and was_present and session_start is not None:
-                log_session(session_start, timestamp)
-                logger.info("Session enregistree, duree %.1fs", (timestamp - session_start).total_seconds())
-                session_start = None
-
-            was_present = present
+            if present:
+                if session_start is None:
+                    session_start = timestamp
+                    logger.info("Debut de session detecte.")
+                last_present_time = timestamp
+            elif session_start is not None:
+                absence = (timestamp - last_present_time).total_seconds()
+                if absence > ABSENCE_TOLERANCE_SECONDS:
+                    log_session(session_start, last_present_time)
+                    logger.info(
+                        "Session enregistree, duree %.1fs",
+                        (last_present_time - session_start).total_seconds(),
+                    )
+                    session_start = None
+                    last_present_time = None
 
     except KeyboardInterrupt:
         logger.info("Arret demande par l'utilisateur.")

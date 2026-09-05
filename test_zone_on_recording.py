@@ -22,6 +22,7 @@ from src.zone import Zone
 
 WORK_ZONE = Zone(x1=500, y1=150, x2=700, y2=300)
 OUTPUT_FILE = "sessions_test.csv"
+ABSENCE_TOLERANCE_SECONDS = 3
 
 
 def check_presence(frame, zone):
@@ -55,8 +56,8 @@ def main():
     print(f"Lecture de l'enregistrement entre {start.time()} et {end.time()}...")
 
     capture = open_stream(url)
-    was_present = False
     session_start = None
+    last_present_time = None
     frame_count = 0
 
     try:
@@ -77,14 +78,17 @@ def main():
                 print(f"Erreur detection: {exc}")
                 continue
 
-            if present and not was_present:
-                session_start = timestamp
-                print(f"[{timestamp.strftime('%H:%M:%S')}] debut de presence")
-            elif not present and was_present and session_start is not None:
-                log_session(session_start, timestamp)
-                session_start = None
-
-            was_present = present
+            if present:
+                if session_start is None:
+                    session_start = timestamp
+                    print(f"[{timestamp.strftime('%H:%M:%S')}] debut de presence")
+                last_present_time = timestamp
+            elif session_start is not None:
+                absence = (timestamp - last_present_time).total_seconds()
+                if absence > ABSENCE_TOLERANCE_SECONDS:
+                    log_session(session_start, last_present_time)
+                    session_start = None
+                    last_present_time = None
 
     finally:
         capture.release()

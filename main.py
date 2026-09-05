@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 WORK_ZONE = Zone(x1=500, y1=150, x2=700, y2=300)
 MACHINE_NAME = os.getenv("MACHINE_NAME", "Machine 1")
 SESSIONS_FILE = "sessions.csv"
-ABSENCE_TOLERANCE_SECONDS = 3
+ABSENCE_TOLERANCE_SECONDS = 8
 
 
 def check_presence(frame, zone):

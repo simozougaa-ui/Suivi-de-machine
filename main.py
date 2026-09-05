@@ -26,9 +26,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Zone de travail, en pixels, calibrée le 2026-09-05 sur calibrate_day.png
-# (endroit précis où l'opérateur charge la palette, caméra 15).
-WORK_ZONE = Zone(x1=500, y1=150, x2=700, y2=300)
+# Zone de travail, en pixels, recalibrée le 2026-09-05 sur calibrate_day.png
+# pris a 11:48:00 (moment confirme d'un vrai chargement) : l'ancienne zone
+# (500-700, 150-300) ne couvrait pas les personnes actives visibles a ce
+# moment-la, decalees plus a droite et plus haut.
+WORK_ZONE = Zone(x1=480, y1=0, x2=900, y2=300)
 MACHINE_NAME = os.getenv("MACHINE_NAME", "Machine 1")
 SESSIONS_FILE = "sessions.csv"
 ABSENCE_TOLERANCE_SECONDS = 8

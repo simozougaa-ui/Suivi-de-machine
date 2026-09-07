@@ -3,23 +3,39 @@ caméra ne voit la machine que de côté/de dos (le YOLO de détection de
 personnes entières ne fonctionne pas bien si seule une partie du corps
 est visible, cachée par la machine elle-même).
 
-Principe : on capture une image de référence de la zone **vide** (aucune
-activité), puis on compare chaque nouvelle image à cette référence. Le
-moindre changement de pixels (un bout de bras, une ombre, un objet) dans
-cette zone est considéré comme une présence — pas besoin de reconnaître
-une personne entière.
+Principe : on capture une image de référence de la machine **vide**
+(aucune activité), puis on compare chaque nouvelle image à cette
+référence — mais seulement à l'intérieur du contour précis de la machine
+(un polygone, pas un simple rectangle), pour ignorer tout ce qui bouge
+autour (sol, autres personnes plus loin). Le moindre changement de pixels
+à l'intérieur de ce contour (un bout de bras, une ombre) est considéré
+comme une présence — pas besoin de reconnaître une personne entière.
 
 Limite à connaître : la référence doit être reprise si l'éclairage change
-fortement (ex: jour → nuit, mode infrarouge). Une référence prise de jour
-ne sert à rien la nuit.
+fortement (ex: jour → nuit, mode infrarouge), ou si la machine elle-même
+a un aspect différent à l'arrêt et en marche (pièces mobiles) — dans ce
+dernier cas, une référence prise machine à l'arrêt peut détecter une
+"présence" continue à cause du mouvement de la machine elle-même, pas
+d'une personne.
 """
 
 import cv2
 import numpy as np
 
-# Rectangle englobant la machine tracée par l'utilisateur (voir la photo
-# annotée du 2026-09-05 12:00:20) : coin haut-gauche à bas-droit.
-MACHINE_ROI = (180, 110, 700, 400)  # (x1, y1, x2, y2) — trace precis du 2026-09-05 12:00:20
+# Contour precis de la machine, releve sur calibrate_day.png du
+# 2026-09-05 12:00:20 (grille + trace de l'utilisateur, corrige point par
+# point). Liste de points (x, y) dans le repere de l'image complete.
+MACHINE_POLYGON = [
+    (280, 130),
+    (420, 110),
+    (550, 125),
+    (650, 115),
+    (700, 140),
+    (700, 400),
+    (450, 395),
+    (300, 370),
+    (280, 300),
+]
 
 REFERENCE_FILE = "reference_background.png"
 DIFF_THRESHOLD = 30  # écart de niveau de gris à partir duquel un pixel compte comme "change"
@@ -27,7 +43,29 @@ CHANGE_RATIO_THRESHOLD = 0.02  # fraction de la zone qui doit changer pour dire 
 BLUR_KERNEL = (5, 5)  # attenue le bruit de l'image (grain de compression, reflets)
 
 
-def crop_roi(frame, roi=MACHINE_ROI):
+def _bounding_rect(polygon):
+    xs = [p[0] for p in polygon]
+    ys = [p[1] for p in polygon]
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def _build_mask(shape, polygon, origin):
+    """Masque binaire (dans le repere du rectangle englobant) : 255 a
+    l'interieur du polygone, 0 ailleurs."""
+    ox, oy = origin
+    shifted = np.array([[x - ox, y - oy] for x, y in polygon], dtype=np.int32)
+    mask = np.zeros(shape, dtype=np.uint8)
+    cv2.fillPoly(mask, [shifted], 255)
+    return mask
+
+
+_ROI = _bounding_rect(MACHINE_POLYGON)
+_X1, _Y1, _X2, _Y2 = _ROI
+_MASK = _build_mask((_Y2 - _Y1, _X2 - _X1), MACHINE_POLYGON, (_X1, _Y1))
+_MASK_AREA = cv2.countNonZero(_MASK)
+
+
+def crop_roi(frame, roi=_ROI):
     x1, y1, x2, y2 = roi
     return frame[y1:y2, x1:x2]
 
@@ -38,7 +76,7 @@ def _prepare(frame_roi):
 
 
 def load_reference(path=REFERENCE_FILE):
-    """Charge l'image de référence (déjà recadrée sur MACHINE_ROI)."""
+    """Charge l'image de référence (déjà recadrée sur le rectangle englobant)."""
     reference = cv2.imread(path)
     if reference is None:
         raise FileNotFoundError(
@@ -48,8 +86,10 @@ def load_reference(path=REFERENCE_FILE):
     return _prepare(reference)
 
 
-def change_ratio(frame, reference_prepared, roi=MACHINE_ROI):
-    """Retourne la fraction de pixels de la zone qui diffèrent de la référence."""
+def change_ratio(frame, reference_prepared, roi=_ROI, mask=_MASK, mask_area=_MASK_AREA):
+    """Retourne la fraction de pixels **à l'intérieur du contour de la
+    machine** qui diffèrent de la référence (le reste de l'image, hors
+    contour, est ignoré)."""
     current = _prepare(crop_roi(frame, roi))
     if current.shape != reference_prepared.shape:
         raise ValueError(
@@ -59,11 +99,11 @@ def change_ratio(frame, reference_prepared, roi=MACHINE_ROI):
         )
 
     diff = cv2.absdiff(current, reference_prepared)
-    _, mask = cv2.threshold(diff, DIFF_THRESHOLD, 255, cv2.THRESH_BINARY)
-    changed_pixels = cv2.countNonZero(mask)
-    total_pixels = mask.shape[0] * mask.shape[1]
-    return changed_pixels / total_pixels
+    _, changed = cv2.threshold(diff, DIFF_THRESHOLD, 255, cv2.THRESH_BINARY)
+    changed_inside = cv2.bitwise_and(changed, mask)
+    changed_pixels = cv2.countNonZero(changed_inside)
+    return changed_pixels / mask_area
 
 
-def is_present(frame, reference_prepared, roi=MACHINE_ROI, ratio_threshold=CHANGE_RATIO_THRESHOLD):
-    return change_ratio(frame, reference_prepared, roi) > ratio_threshold
+def is_present(frame, reference_prepared, ratio_threshold=CHANGE_RATIO_THRESHOLD):
+    return change_ratio(frame, reference_prepared) > ratio_threshold

@@ -19,7 +19,7 @@ from datetime import datetime, timedelta
 
 import cv2
 
-from src.background_detection import MACHINE_ROI, REFERENCE_FILE, crop_roi
+from src.background_detection import REFERENCE_FILE, crop_roi
 from src.camera_stream import build_rtsp_playback_url, open_stream
 
 
@@ -48,7 +48,7 @@ def main():
         print("ECHEC: impossible de lire une image.")
         return
 
-    roi_frame = crop_roi(frame, MACHINE_ROI)
+    roi_frame = crop_roi(frame)
     cv2.imwrite(REFERENCE_FILE, roi_frame)
     height, width = roi_frame.shape[:2]
     print(f"OK: reference sauvegardee dans {REFERENCE_FILE} ({width}x{height})")

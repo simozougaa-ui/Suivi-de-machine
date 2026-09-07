@@ -62,9 +62,50 @@ def _build_mask(shape, polygon, origin):
     return mask
 
 
+MACHINE_MASK_FILE = "machine_mask.png"
+
 _ROI = _bounding_rect(MACHINE_POLYGON)
 _X1, _Y1, _X2, _Y2 = _ROI
-_MASK = _build_mask((_Y2 - _Y1, _X2 - _X1), MACHINE_POLYGON, (_X1, _Y1))
+
+
+def _load_or_build_mask():
+    """Charge le masque affine (voir compute_machine_mask.py) s'il existe
+    deja, sinon retombe sur le polygone brut (lignes droites)."""
+    saved = cv2.imread(MACHINE_MASK_FILE, cv2.IMREAD_GRAYSCALE)
+    if saved is not None:
+        return saved
+    return _build_mask((_Y2 - _Y1, _X2 - _X1), MACHINE_POLYGON, (_X1, _Y1))
+
+
+def refine_mask_grabcut(frame, polygon=MACHINE_POLYGON, iterations=5):
+    """Affine le polygone brut en un contour lisse suivant les vrais bords
+    de l'objet (couleur/texture), via l'algorithme GrabCut d'OpenCV.
+
+    A lancer une seule fois (voir compute_machine_mask.py), pas a chaque
+    image en direct — GrabCut est trop lent pour tourner en continu.
+    """
+    poly_mask = np.zeros(frame.shape[:2], dtype=np.uint8)
+    cv2.fillPoly(poly_mask, [np.array(polygon, dtype=np.int32)], 255)
+
+    kernel = np.ones((15, 15), np.uint8)
+    sure_fg = cv2.erode(poly_mask, kernel, iterations=2)
+    probable_area = cv2.dilate(poly_mask, kernel, iterations=3)
+
+    gc_mask = np.full(frame.shape[:2], cv2.GC_BGD, dtype=np.uint8)
+    gc_mask[probable_area > 0] = cv2.GC_PR_BGD
+    gc_mask[poly_mask > 0] = cv2.GC_PR_FGD
+    gc_mask[sure_fg > 0] = cv2.GC_FGD
+
+    bgd_model = np.zeros((1, 65), dtype=np.float64)
+    fgd_model = np.zeros((1, 65), dtype=np.float64)
+    cv2.grabCut(frame, gc_mask, None, bgd_model, fgd_model, iterations, cv2.GC_INIT_WITH_MASK)
+
+    refined = np.where((gc_mask == cv2.GC_FGD) | (gc_mask == cv2.GC_PR_FGD), 255, 0).astype(np.uint8)
+    x1, y1, x2, y2 = _bounding_rect(polygon)
+    return refined[y1:y2, x1:x2]
+
+
+_MASK = _load_or_build_mask()
 _MASK_AREA = cv2.countNonZero(_MASK)
 
 

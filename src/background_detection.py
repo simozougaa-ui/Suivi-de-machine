@@ -26,15 +26,18 @@ import numpy as np
 # 2026-09-05 12:00:20 (grille + trace de l'utilisateur, corrige point par
 # point). Liste de points (x, y) dans le repere de l'image complete.
 MACHINE_POLYGON = [
-    (280, 130),
-    (420, 110),
-    (550, 125),
-    (650, 115),
-    (700, 140),
-    (700, 400),
-    (450, 395),
-    (300, 370),
-    (280, 300),
+    (200, 140),
+    (280, 110),
+    (420, 100),
+    (550, 95),
+    (650, 90),
+    (700, 130),
+    (700, 350),
+    (630, 405),
+    (450, 410),
+    (280, 400),
+    (180, 320),
+    (180, 200),
 ]
 
 REFERENCE_FILE = "reference_background.png"

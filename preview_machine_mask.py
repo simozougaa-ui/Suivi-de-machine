@@ -1,5 +1,5 @@
 """Montre uniquement l'intérieur du contour de la machine (MACHINE_POLYGON),
-tout le reste mis en noir — pour vérifier visuellement que le contour
+tout le reste mis en blanc — pour vérifier visuellement que le contour
 suit bien la machine et rien d'autre autour.
 
 Usage :
@@ -10,6 +10,7 @@ import argparse
 from datetime import datetime, timedelta
 
 import cv2
+import numpy as np
 
 from src.background_detection import _MASK, _ROI, crop_roi
 from src.camera_stream import build_rtsp_playback_url, open_stream
@@ -43,7 +44,11 @@ def main():
         return
 
     roi_frame = crop_roi(frame, _ROI)
-    masked = cv2.bitwise_and(roi_frame, roi_frame, mask=_MASK)
+    machine_only = cv2.bitwise_and(roi_frame, roi_frame, mask=_MASK)
+    white_background = np.full_like(roi_frame, 255)
+    inverse_mask = cv2.bitwise_not(_MASK)
+    background_only = cv2.bitwise_and(white_background, white_background, mask=inverse_mask)
+    masked = cv2.add(machine_only, background_only)
 
     cv2.imwrite(OUTPUT_PATH, masked)
     height, width = masked.shape[:2]

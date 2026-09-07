@@ -13,7 +13,13 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 SESSIONS_FILE = "sessions.csv"
 PORT = 8000
-IMAGE_FILES = {"/calibrate.png", "/calibrate_day.png", "/frame_test.png", "/reference_background.png"}
+IMAGE_FILES = {
+    "/calibrate.png",
+    "/calibrate_day.png",
+    "/frame_test.png",
+    "/reference_background.png",
+    "/machine_mask_preview.png",
+}
 
 
 def load_sessions():

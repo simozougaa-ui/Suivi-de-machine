@@ -19,7 +19,7 @@ import numpy as np
 
 # Rectangle englobant la machine tracée par l'utilisateur (voir la photo
 # annotée du 2026-09-05 12:00:20) : coin haut-gauche à bas-droit.
-MACHINE_ROI = (180, 80, 700, 400)  # (x1, y1, x2, y2) — trace precis du 2026-09-05 12:00:20
+MACHINE_ROI = (180, 110, 700, 400)  # (x1, y1, x2, y2) — trace precis du 2026-09-05 12:00:20
 
 REFERENCE_FILE = "reference_background.png"
 DIFF_THRESHOLD = 30  # écart de niveau de gris à partir duquel un pixel compte comme "change"

@@ -87,10 +87,25 @@ En production, les deux tournent en continu via systemd — voir
    — recalcule `reference_fragments.png` (médiane de plusieurs images
    espacées, efface les présences occasionnelles pour ne garder que le
    fond "machine vide").
-2. `contact_sheet.py --date AAAA-MM-JJ --debut HH:MM:SS --duree 1200`
-   — produit `contact_sheet.png`, une planche de vignettes (une toutes les
-   10s) avec le statut prédit et les zones dessinées, à regarder
-   soi-même pour vérifier visuellement.
+2. `contact_sheet.py --date AAAA-MM-JJ --debut HH:MM:SS --duree 1200 --pas 10`
+   — produit des **pages** de validation lisibles sur téléphone
+   (`contact_pages/page_01.png`, `page_02.png`, ...), 6 vignettes par page
+   (2 colonnes x 3 lignes), **recadrées en pleine résolution** sur la zone
+   utile (constante `CROP` dans le script — les 3 zones + le bout droit de
+   la machine, pas toute la caméra) : chaque vignette montre l'heure, le
+   statut (bandeau rouge/vert), les 3 zones (rouge si déclenchée) et leur
+   ratio (ex. `tete 0.12/0.08`). Consultable depuis le téléphone sans SSH
+   via `/contact` sur le tableau de bord (voir plus bas). Les anciennes
+   pages sont supprimées avant d'écrire les nouvelles.
+
+   Sauvegarde aussi chaque image plein cadre échantillonnée dans
+   `debug_frames/<AAAA-MM-JJ>_<HHMMSS-debut>/frame_<HHMMSS>.jpg` (JPEG
+   qualité 92) — utile car le DVR écrase ses enregistrements au bout de
+   17 jours. Pour régénérer les pages plus tard à partir de ces images
+   sans redemander au DVR :
+   ```bash
+   .venv/bin/python3 contact_sheet.py --depuis-dossier debug_frames/2026-09-05_114000
+   ```
 3. `test_fragments_on_recording.py --date AAAA-MM-JJ --debut HH:MM:SS --duree 1800`
    — rejoue un enregistrement et affiche une chronologie présent/absent
    seconde par seconde avec le ratio de chaque zone, utile pour ajuster
@@ -100,6 +115,15 @@ Les scripts équivalents pour l'ancienne méthode (soustraction de fond sur
 toute la machine) existent aussi : `capture_reference.py`,
 `compute_machine_mask.py`, `test_background_on_recording.py`.
 
+Ces trois scripts (`compute_reference_fragments.py`,
+`test_fragments_on_recording.py`, `contact_sheet.py`) écrivent leur
+avancement avec `flush=True` — utile pour les lancer en arrière-plan et
+suivre en direct avec `tail -f` :
+```bash
+nohup .venv/bin/python3 contact_sheet.py --date 2026-09-05 --debut 11:40:00 --duree 1200 > contact.log 2>&1 &
+tail -f contact.log
+```
+
 ## Outils de débogage visuel (depuis le tableau de bord, port 8000)
 
 | Chemin | Contenu |
@@ -107,7 +131,7 @@ toute la machine) existent aussi : `capture_reference.py`,
 | `/calibrate.png`, `/calibrate_day.png` | capture brute avec grille de coordonnées |
 | `/reference_fragments.png` | référence "machine vide" (méthode fragments) |
 | `/zones_debug.png` | dernière image analysée, zones dessinées (rouge = déclenchée), régénérée toutes les 10s par `main.py` |
-| `/contact_sheet.png` | planche de validation (voir ci-dessus) |
+| `/contact` | pages de validation produites par `contact_sheet.py` (voir ci-dessus), une à la fois, avec navigation précédent/suivant |
 | `/reference_background.png`, `/machine_mask_preview.png` | référence et contour (ancienne méthode background_detection) |
 
 ## État d'avancement

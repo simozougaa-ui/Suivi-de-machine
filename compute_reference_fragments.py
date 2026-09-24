@@ -44,7 +44,7 @@ def main():
     end = start + timedelta(seconds=args.duree)
 
     url = build_rtsp_playback_url(start, end)
-    print(f"Lecture de l'enregistrement entre {start.time()} et {end.time()}, un echantillon toutes les {args.pas}s...")
+    print(f"Lecture de l'enregistrement entre {start.time()} et {end.time()}, un echantillon toutes les {args.pas}s...", flush=True)
 
     capture = open_stream(url)
     samples = []
@@ -62,19 +62,19 @@ def main():
             if frame_count >= next_sample_frame:
                 samples.append(frame)
                 next_sample_frame = frame_count + step_frames
-                print(f"  echantillon {len(samples)} pris (image {frame_count})")
+                print(f"  echantillon {len(samples)} pris (image {frame_count})", flush=True)
     finally:
         capture.release()
 
     if len(samples) < 3:
-        print(f"ECHEC: seulement {len(samples)} echantillon(s), pas assez pour une mediane fiable (minimum 3). Augmentez --duree ou reduisez --pas.")
+        print(f"ECHEC: seulement {len(samples)} echantillon(s), pas assez pour une mediane fiable (minimum 3). Augmentez --duree ou reduisez --pas.", flush=True)
         return
 
     stack = np.stack(samples, axis=0)
     median = np.median(stack, axis=0).astype(np.uint8)
 
     cv2.imwrite(REFERENCE_FILE, median)
-    print(f"OK: reference calculee sur {len(samples)} images, sauvegardee dans {REFERENCE_FILE}")
+    print(f"OK: reference calculee sur {len(samples)} images, sauvegardee dans {REFERENCE_FILE}", flush=True)
 
 
 if __name__ == "__main__":

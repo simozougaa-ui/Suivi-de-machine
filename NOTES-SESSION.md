@@ -79,10 +79,12 @@ première estimation raisonnée, à confirmer avec les outils prévus pour
    pour recalculer `reference_fragments.png` (médiane d'images espacées,
    efface les présences occasionnelles et ne garde que le fond).
 2. `contact_sheet.py --date AAAA-MM-JJ --debut HH:MM:SS --duree 1200`
-   pour produire une planche de vignettes (une toutes les 10s, ~20 min)
+   pour produire des pages de vignettes (une image toutes les 10s, ~20 min)
    avec le statut prédit et les 3 zones dessinées (rouge = déclenchée) —
-   à regarder soi-même pour vérifier visuellement que ça correspond à la
-   réalité.
+   à regarder soi-même (ou via `/contact` sur le tableau de bord) pour
+   vérifier visuellement que ça correspond à la réalité. Voir la section
+   dédiée ci-dessous pour le détail (recadrage, pagination, stockage des
+   images source).
 3. `test_fragments_on_recording.py --date AAAA-MM-JJ --debut HH:MM:SS --duree 1800`
    pour une chronologie texte présent/absent seconde par seconde, avec le
    ratio de chaque zone — utile pour ajuster `THRESHOLDS` dans
@@ -125,6 +127,81 @@ image avec les 3 zones dessinées et leur ratio), servi par
 allers-retours du conducteur pour chercher une palette, ou un simple
 masquage par la machine, durent souvent 6 à 20s — 8s coupait des
 sessions réelles en plusieurs morceaux.
+
+### Feuille de contact lisible sur téléphone (mise à jour du 2026-09-24)
+
+**Problème signalé** : `contact_sheet.png` (première version) produisait
+une seule grande image de 60 vignettes montrant toute la caméra en
+320px de large — illisible sur téléphone, le conducteur n'y faisait
+qu'environ 15px de haut.
+
+**Corrections apportées à `contact_sheet.py` :**
+
+- **Recadrage** sur une constante `CROP = (420, 60, 820, 440)` (pixels du
+  flux 1280x720), qui couvre les 3 zones (tête/jambes/pile) et le bout
+  droit de la machine — vérifié visuellement (image générée et regardée)
+  que les 3 zones tiennent entièrement dedans, sans coupure.
+- Les vignettes ne sont **jamais réduites**, seulement agrandies
+  (`cv2.INTER_CUBIC`) pour que 2 côte à côte fassent ~1080px de large
+  (`THUMB_WIDTH = 540`).
+- **Étiquettes de zone à l'intérieur du rectangle**, pas au-dessus : un
+  premier essai plaçait le texte juste au-dessus de chaque zone, mais
+  `ZONE_JAMBES` et `ZONE_PILE` se touchent presque (x 520-640 et
+  630-700) — leurs étiquettes se chevauchaient et devenaient illisibles.
+  Corrigé en écrivant le texte (`nom ratio/seuil`, ex. `tete 0.12/0.08`)
+  dans le coin haut-gauche de chaque rectangle, dans sa propre couleur —
+  vérifié sur une image générée, plus de chevauchement.
+- **Pagination** : 6 vignettes par page (2 colonnes x 3 lignes), dans
+  `contact_pages/page_01.png`, `page_02.png`, etc. Les anciennes pages du
+  dossier sont supprimées avant d'écrire les nouvelles (évite de garder
+  d'anciennes pages en trop si le nombre de vignettes diminue d'une
+  exécution à l'autre).
+- **Images source conservées** : chaque image plein cadre échantillonnée
+  est sauvegardée en JPEG qualité 92 dans
+  `debug_frames/<AAAA-MM-JJ>_<HHMMSS-debut>/frame_<HHMMSS>.jpg` — le DVR
+  Dahua écrase ses enregistrements au bout de 17 jours, donc ces copies
+  sont la seule trace durable si on veut revalider plus tard.
+- **`--depuis-dossier CHEMIN`** : régénère les pages à partir d'un dossier
+  `debug_frames/...` déjà rempli, sans reconnexion au DVR (la date est
+  déduite du nom du dossier, l'heure de chaque image de son nom de
+  fichier).
+- **`--pas`** (secondes entre deux images échantillonnées, défaut 10)
+  ajouté en plus de `--date --debut --duree`.
+- `debug_frames/` et `contact_pages/` ajoutés au `.gitignore` — ce sont
+  des images régénérables à la demande, pas du code.
+
+**`dashboard.py` — page `/contact`** : liste les pages disponibles avec
+navigation précédent/suivant (`/contact?page=N`), image en largeur 100%
+(balise viewport), lisible sur téléphone. Sert aussi
+`/contact_pages/page_NN.png` via une expression régulière **stricte**
+(`^/contact_pages/page_\d{2}\.png$`) qui n'autorise que ce motif exact —
+testé explicitement contre plusieurs tentatives de traversée de chemin
+(`/contact_pages/../main.py`, `/contact_pages/page_01.png/../../.env`) et
+contre des motifs proches mais invalides (`page_1.png`, `page_01.jpg`) :
+tous tombent correctement en dehors de la route et n'exposent aucun
+fichier. Les routes existantes (`/`, `/calibrate.png`, etc.) sont
+inchangées.
+
+**Journal en direct sous `nohup`** : `flush=True` ajouté à tous les
+`print()` de `contact_sheet.py`, `compute_reference_fragments.py` et
+`test_fragments_on_recording.py`, pour que `tail -f contact.log` montre
+la progression immédiatement plutôt que par paquets bufferisés.
+
+**Validation faite dans cette session** : avec des images synthétiques
+(bruit aléatoire, pas d'enregistrement réel — même contrainte d'accès
+réseau que pour le calibrage initial des zones, voir plus haut) :
+contour des 3 zones vérifié à l'intérieur de `CROP`, rendu d'une
+vignette et d'une page complète regardés directement (chevauchement
+d'étiquettes détecté et corrigé grâce à ça), pagination (nettoyage des
+anciennes pages, découpage en pages de 6) vérifiée par du code qui crée
+un fichier factice `page_99.png` puis vérifie qu'il disparaît. Les
+routes `/contact` et `/contact_pages/page_NN.png` ont été testées avec
+un vrai serveur HTTP local (module `http.server`), y compris les
+tentatives de traversée de chemin ci-dessus. **Reste à faire depuis le
+Jetson** : générer une vraie feuille de contact sur un enregistrement
+réel (par ex. le 2026-09-23 vers 13:21) et vérifier que le recadrage
+`CROP` montre bien le conducteur quand il est présent — pas seulement
+que les zones y tiennent géométriquement.
 
 ## Contexte de cette session
 

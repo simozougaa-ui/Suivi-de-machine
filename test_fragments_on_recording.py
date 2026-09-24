@@ -31,7 +31,7 @@ def log_session(start, end):
         if not file_exists:
             writer.writerow(["debut", "fin", "duree_secondes"])
         writer.writerow([start.isoformat(), end.isoformat(), round(duration, 1)])
-    print(f"  -> session: {start.strftime('%H:%M:%S')} a {end.strftime('%H:%M:%S')} ({duration:.1f}s)")
+    print(f"  -> session: {start.strftime('%H:%M:%S')} a {end.strftime('%H:%M:%S')} ({duration:.1f}s)", flush=True)
 
 
 def main():
@@ -50,7 +50,7 @@ def main():
     tracker = FragmentPresenceTracker()
 
     url = build_rtsp_playback_url(start, end)
-    print(f"Lecture de l'enregistrement entre {start.time()} et {end.time()}...")
+    print(f"Lecture de l'enregistrement entre {start.time()} et {end.time()}...", flush=True)
 
     capture = open_stream(url)
     session_start = None
@@ -79,14 +79,14 @@ def main():
             try:
                 present, zone_results = tracker.update(frame, reference)
             except Exception as exc:
-                print(f"Erreur detection: {exc}")
+                print(f"Erreur detection: {exc}", flush=True)
                 continue
 
             zone_summary = " ".join(
                 f"{name}={ratio:.2f}{'*' if triggered else ' '}"
                 for name, (ratio, triggered) in zone_results.items()
             )
-            print(f"[{timestamp.strftime('%H:%M:%S')}] {'PRESENT' if present else 'absent '} {zone_summary}")
+            print(f"[{timestamp.strftime('%H:%M:%S')}] {'PRESENT' if present else 'absent '} {zone_summary}", flush=True)
 
             if present:
                 if session_start is None:
@@ -102,7 +102,7 @@ def main():
     finally:
         capture.release()
 
-    print(f"Termine. {frame_count} images lues. Resultats dans {OUTPUT_FILE}.")
+    print(f"Termine. {frame_count} images lues. Resultats dans {OUTPUT_FILE}.", flush=True)
 
 
 if __name__ == "__main__":

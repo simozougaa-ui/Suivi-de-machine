@@ -16,3 +16,8 @@ dist/
 
 # Divers
 .DS_Store
+
+# Images generees par contact_sheet.py (potentiellement volumineuses,
+# regenerees a la demande depuis le DVR ou --depuis-dossier)
+contact_pages/
+debug_frames/

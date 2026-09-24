@@ -1,14 +1,19 @@
 """Tableau de bord web minimal (stdlib uniquement, sans dépendance en plus).
 
-Sert deux choses sur le même port :
+Sert plusieurs choses sur le même port :
 - "/" : la page HTML listant les sessions enregistrées (sessions.csv).
 - une image de calibration (ex "/calibrate.png"), produite par
   calibrate_zone.py, pour lire les coordonnées pixels de la zone de travail
   depuis le téléphone sans passer par SSH.
+- "/contact" : les pages de validation produites par contact_sheet.py
+  (contact_pages/page_NN.png), une à la fois, avec navigation
+  précédent/suivant — lisible sur téléphone.
 """
 
 import csv
 import os
+import re
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 SESSIONS_FILE = "sessions.csv"
@@ -23,6 +28,11 @@ IMAGE_FILES = {
     "/zones_debug.png",
     "/contact_sheet.png",
 }
+
+CONTACT_PAGES_DIR = "contact_pages"
+# N'accepte QUE ce motif exact ("page_" + 2 chiffres + ".png") : pas de
+# traversee de chemin possible (aucun "/", ".." ou autre caractere permis).
+CONTACT_IMAGE_RE = re.compile(r"^/contact_pages/(page_\d{2}\.png)$")
 
 
 def load_sessions():
@@ -63,10 +73,93 @@ def render_html():
     """
 
 
+def list_contact_pages():
+    if not os.path.isdir(CONTACT_PAGES_DIR):
+        return []
+    names = [f for f in os.listdir(CONTACT_PAGES_DIR) if re.match(r"^page_\d{2}\.png$", f)]
+    return sorted(names)
+
+
+def render_contact(page_num):
+    pages = list_contact_pages()
+    if not pages:
+        return """
+        <html>
+        <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>Feuille de contact</title>
+            <style>body { font-family: sans-serif; padding: 20px; background: #111; color: #eee; }</style>
+        </head>
+        <body>
+            <h2>Feuille de contact</h2>
+            <p>Aucune page disponible pour l'instant. Lancez contact_sheet.py sur le Jetson.</p>
+        </body>
+        </html>
+        """
+
+    total = len(pages)
+    page_num = max(1, min(page_num, total))
+    prev_link = f'<a href="/contact?page={page_num - 1}">&larr; Precedent</a>' if page_num > 1 else ""
+    next_link = f'<a href="/contact?page={page_num + 1}">Suivant &rarr;</a>' if page_num < total else ""
+
+    return f"""
+    <html>
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>Feuille de contact</title>
+        <style>
+            body {{ font-family: sans-serif; padding: 0; margin: 0; background: #111; color: #eee; text-align: center; }}
+            h2 {{ padding: 12px 0 4px; margin: 0; font-size: 1.1em; }}
+            img {{ width: 100%; height: auto; display: block; }}
+            .nav {{ padding: 10px 0; }}
+            .nav a {{ color: #5af; text-decoration: none; margin: 0 16px; font-size: 1.1em; }}
+        </style>
+    </head>
+    <body>
+        <h2>Feuille de contact — page {page_num}/{total}</h2>
+        <div class="nav">{prev_link} {next_link}</div>
+        <img src="/contact_pages/page_{page_num:02d}.png" alt="page {page_num}">
+        <div class="nav">{prev_link} {next_link}</div>
+    </body>
+    </html>
+    """
+
+
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path in IMAGE_FILES:
-            filename = self.path.lstrip("/")
+        parsed = urllib.parse.urlparse(self.path)
+        path = parsed.path
+
+        if path == "/contact":
+            query = urllib.parse.parse_qs(parsed.query)
+            try:
+                page_num = int(query.get("page", ["1"])[0])
+            except ValueError:
+                page_num = 1
+            self.send_response(200)
+            self.send_header("Content-type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(render_contact(page_num).encode("utf-8"))
+            return
+
+        contact_match = CONTACT_IMAGE_RE.match(path)
+        if contact_match:
+            filename = os.path.join(CONTACT_PAGES_DIR, contact_match.group(1))
+            if os.path.isfile(filename):
+                self.send_response(200)
+                self.send_header("Content-type", "image/png")
+                self.end_headers()
+                with open(filename, "rb") as f:
+                    self.wfile.write(f.read())
+            else:
+                self.send_response(404)
+                self.end_headers()
+            return
+
+        if path in IMAGE_FILES:
+            filename = path.lstrip("/")
             if os.path.isfile(filename):
                 self.send_response(200)
                 self.send_header("Content-type", "image/png")

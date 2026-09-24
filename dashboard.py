@@ -19,6 +19,9 @@ IMAGE_FILES = {
     "/frame_test.png",
     "/reference_background.png",
     "/machine_mask_preview.png",
+    "/reference_fragments.png",
+    "/zones_debug.png",
+    "/contact_sheet.png",
 }
 
 

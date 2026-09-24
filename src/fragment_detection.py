@@ -18,6 +18,11 @@ apparaît presque toujours quand il travaille sur cette machine :
   travers les barreaux.
 - ZONE_PILE : autour des piles de feuilles à droite du montant sombre —
   son dos ou son bras quand il est penché dessus, ou une feuille portée.
+- ZONE_CONVOYEUR (ajoutée le 2026-09-24) : à droite de la tête de
+  machine, le long du convoyeur de sortie jusqu'au haut de la palette de
+  feuilles blanches — là où il se tient quand il manipule la palette.
+  Les 3 premières zones le rataient dans cette position (confirmé sur
+  l'enregistrement du 2026-09-23, 13:21:07-13:21:16).
 
 Présence = au moins une zone dont le ratio de pixels changés (par rapport
 à une image de référence "machine vide", voir compute_reference_fragments.py)
@@ -41,6 +46,15 @@ ZONES = {
     "tete": (580, 85, 700, 160),
     "jambes": (520, 210, 640, 340),
     "pile": (630, 220, 700, 400),
+    # Couloir entre le montant droit de la machine (x~700) et le poteau
+    # vertical (x~790) ; au-dela commence la machine voisine — exclue
+    # (autres ouvriers). Borne basse y=250 : juste au-dessus du dessus de
+    # la palette de feuilles. L'inclure (essai a y2=300) declenchait des
+    # faux positifs permanents des que le niveau de la palette baissait
+    # (feuilles prises = changement durable par rapport a la reference).
+    # Zone separee plutot que "pile" agrandie : une zone plus grande dilue
+    # le ratio de pixels changes et rend la detection moins sensible.
+    "convoyeur": (700, 150, 790, 250),
 }
 
 # Seuils par zone : fraction de pixels changés au-delà de laquelle la zone
@@ -51,6 +65,7 @@ THRESHOLDS = {
     "tete": 0.08,
     "jambes": 0.06,
     "pile": 0.05,
+    "convoyeur": 0.06,
 }
 
 REFERENCE_FILE = "reference_fragments.png"

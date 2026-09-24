@@ -37,11 +37,13 @@ import numpy as np
 from src.camera_stream import build_rtsp_playback_url, open_stream
 from src.fragment_detection import FragmentPresenceTracker, THRESHOLDS, ZONES, load_reference
 
-# Rectangle (x1, y1, x2, y2) en pixels du flux 1280x720, qui couvre les 3
-# zones (tete/jambes/pile) et le bout droit de la machine — la partie
-# réellement utile de l'image pour cette validation. Vérifié visuellement
-# (voir NOTES-SESSION.md) : les 3 zones tiennent entièrement dedans.
-CROP = (420, 60, 820, 440)
+# Rectangle (x1, y1, x2, y2) en pixels du flux 1280x720, qui couvre les
+# zones (tete/jambes/pile/convoyeur), le bout droit de la machine et la
+# palette de feuilles blanches — la partie réellement utile de l'image
+# pour cette validation. Élargi à droite (x2 820 -> 860) avec l'ajout de
+# la zone convoyeur, pour voir la palette en entier. Vérifié visuellement
+# (voir NOTES-SESSION.md) : toutes les zones tiennent entièrement dedans.
+CROP = (420, 60, 860, 440)
 
 SAMPLE_INTERVAL_SECONDS = 10
 ASSUMED_FPS = 15.0

@@ -35,7 +35,7 @@ l'API de suivi de production) — pas encore implémenté.
    lecture d'enregistrements passés.
 2. Détection de présence près de la machine, trois méthodes possibles
    (variable d'environnement `PRESENCE_MODE`, voir plus bas) :
-   - **`fragments`** *(défaut)* — surveille 3 petites zones où un morceau
+   - **`fragments`** *(défaut)* — surveille 4 petites zones (tête, jambes, pile, convoyeur) où un morceau
      du corps du conducteur est visible malgré les obstructions de la
      machine (`src/fragment_detection.py`). Voir `NOTES-SESSION.md` pour le
      détail complet et les limites connues.
@@ -91,9 +91,9 @@ En production, les deux tournent en continu via systemd — voir
    — produit des **pages** de validation lisibles sur téléphone
    (`contact_pages/page_01.png`, `page_02.png`, ...), 6 vignettes par page
    (2 colonnes x 3 lignes), **recadrées en pleine résolution** sur la zone
-   utile (constante `CROP` dans le script — les 3 zones + le bout droit de
+   utile (constante `CROP` dans le script — les zones + le bout droit de
    la machine, pas toute la caméra) : chaque vignette montre l'heure, le
-   statut (bandeau rouge/vert), les 3 zones (rouge si déclenchée) et leur
+   statut (bandeau rouge/vert), les zones (rouge si déclenchée) et leur
    ratio (ex. `tete 0.12/0.08`). Consultable depuis le téléphone sans SSH
    via `/contact` sur le tableau de bord (voir plus bas). Les anciennes
    pages sont supprimées avant d'écrire les nouvelles.
@@ -123,6 +123,23 @@ suivre en direct avec `tail -f` :
 nohup .venv/bin/python3 contact_sheet.py --date 2026-09-05 --debut 11:40:00 --duree 1200 > contact.log 2>&1 &
 tail -f contact.log
 ```
+
+## Vérifier la zone convoyeur (à lancer sur le Jetson)
+
+Référence sur une fenêtre longue (la médiane efface mieux le conducteur),
+puis feuille de contact et chronologie sur la plage du 2026-09-23 :
+
+```bash
+cd ~/suivi-de-machine && git pull
+.venv/bin/python3 compute_reference_fragments.py --date 2026-09-23 --debut 12:30:00 --duree 5400 --pas 30
+.venv/bin/python3 contact_sheet.py --date 2026-09-23 --debut 13:15:00 --duree 900 --pas 5
+.venv/bin/python3 test_fragments_on_recording.py --date 2026-09-23 --debut 13:15:00 --duree 900 > test_convoyeur.log
+grep -E '^\[13:21:(0[7-9]|1[0-6])\]' test_convoyeur.log   # doit afficher PRESENT sur toute la fenêtre
+grep -c PRESENT test_convoyeur.log                         # nombre de secondes "présent" sur les 15 min
+sudo systemctl restart suivi-presence                      # prise en compte de la nouvelle zone
+```
+
+Les pages sont visibles depuis le téléphone sur `/contact`.
 
 ## Outils de débogage visuel (depuis le tableau de bord, port 8000)
 

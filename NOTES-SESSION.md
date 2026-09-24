@@ -203,6 +203,74 @@ réel (par ex. le 2026-09-23 vers 13:21) et vérifier que le recadrage
 `CROP` montre bien le conducteur quand il est présent — pas seulement
 que les zones y tiennent géométriquement.
 
+### Zone `convoyeur` ajoutée (mise à jour du 2026-09-24)
+
+**Problème signalé** : les zones rataient le conducteur quand il manipule
+la palette de feuilles sur le côté droit de la machine, le long du
+convoyeur de sortie (confirmé visuellement sur l'enregistrement du
+2026-09-23, 13:21:07–13:21:16 : conducteur juste à droite de la tête de
+machine, hors des rectangles).
+
+**Anciennes zones (inchangées)** : tete (580,85,700,160), jambes
+(520,210,640,340), pile (630,220,700,400).
+**Nouvelle zone** : `convoyeur` = **(700, 150, 790, 250)**, seuil 0.06.
+
+**Pourquoi une 4e zone plutôt qu'agrandir `pile`** : le détecteur mesure
+une *fraction* de pixels changés ; agrandir une zone dilue ce ratio et la
+rend moins sensible à un fragment de corps.
+
+**Calage.** Le DVR n'est pas joignable depuis l'environnement de
+développement (pas sur le réseau Tailscale) : impossible de récupérer la
+frame du 2026-09-23 13:21:16. La zone a été calée sur la vue plein cadre
+de la même caméra fixe, reconstituée à partir des captures DMSS du
+2026-09-05 (zone vidéo extraite et remise à 1280x720) : montant droit de
+la machine x≈700, plateau du convoyeur x 720–790 / y 185–225, palette
+blanche x 715–805 / y 240–300, poteau vertical x≈790, machine voisine
+au-delà de x≈800 (exclue), presse bleue sous y≈340 (exclue).
+
+**Itération sur de vraies images.** 86 captures réelles de la caméra 15
+(2026-09-05, 11:48–12:00, période où le conducteur travaillait sur cette
+machine), référence = médiane de ces images (même méthode que
+`compute_reference_fragments.py`) :
+
+| Borne basse y2 | Déclenchements convoyeur | Palette modifiée, personne absente | Conducteur portant des feuilles |
+|---|---|---|---|
+| 300 (1er essai, inclut le dessus de la palette) | 52/86 | 0.093 → **faux positif** | 0.232 |
+| 250 (**retenu**) | 15/86 | 0.001 | 0.25 |
+| 240 | 11/86 | 0.001 | 0.21 |
+
+- Premier essai y2=300 : la zone incluait le dessus de la palette. Dès que
+  le conducteur retire des feuilles, le niveau de la palette change
+  **durablement** par rapport à la référence → faux positif permanent
+  jusqu'au prochain recalcul de référence. Vu directement sur les images
+  (palette plus basse, aucune personne dans le cadre).
+- y2=250 : les 15 images qui déclenchent ont toutes été regardées une par
+  une — le conducteur y est visible à chaque fois (portant une pile de
+  feuilles au-dessus du convoyeur, penché vers la palette, bras tendus).
+  Aucun faux positif constaté. y2=240 en perdait 4 (conducteur penché
+  bas, juste au-dessus de la palette).
+- Présence brute (au moins une zone) sur ces 86 images : **29 avec les 3
+  anciennes zones → 40 avec `convoyeur`**, dont 11 vues uniquement par la
+  nouvelle zone.
+
+**Limite restante connue** : si le conducteur se tient *derrière* la
+palette sans rien dépasser au-dessus (y > 250), la zone ne le voit pas —
+c'est le prix à payer pour éviter la dérive due au niveau de la palette.
+
+**`contact_sheet.py`** : `CROP` élargi de (420,60,820,440) à
+(420,60,860,440) pour que la palette et la nouvelle zone soient
+entièrement visibles sur les vignettes (vérifié sur des vignettes
+générées à partir des vraies captures).
+
+**Reste à faire depuis le Jetson** (DVR inaccessible d'ici) : rejouer la
+plage du 2026-09-23 13:15–13:30 et vérifier la présence continue sur
+13:21:07–13:21:16 (commandes dans README.md, section « Vérifier la zone
+convoyeur »). Pour la référence, préférer une fenêtre plus longue que les
+15 minutes testées (ex. `--debut 12:30:00 --duree 5400 --pas 30`) : si le
+conducteur reste plus de la moitié du temps au même endroit dans une
+fenêtre courte, la médiane l'intègre dans la référence et le rend
+invisible.
+
 ## Contexte de cette session
 
 *(Section historique — voir « État actuel » ci-dessus pour la situation réelle.)*

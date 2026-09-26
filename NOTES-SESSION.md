@@ -646,6 +646,20 @@ de couleur (intra ~1,7 en a,b sur DMSS) à ce qu'on obtient sur des images
 non compressées manuellement — cette comparaison ne peut être faite
 qu'une fois ces commandes exécutées.
 
+### Correctif curl `--globoff` sur `dvr_check/list_recordings.sh` (mise à jour du 2026-09-26)
+
+`list_recordings.sh` échouait ("curl: (3) bad range in URL position 200")
+sur l'appel `findFile` : l'URL contient `condition.Types[0]=dav`, un
+paramètre littéral requis par le CGI Dahua `mediaFileFind`, mais curl
+interprète par défaut `[0]` comme sa propre syntaxe de génération d'URLs
+(globbing), pas comme du texte. L'authentification (`--digest`) n'était
+pas en cause.
+
+**Correctif** : ajout de `-g` (`--globoff`, désactive le globbing) à cet
+appel curl. Les autres appels curl du dépôt (`dvr_check/check_stream_config.sh`,
+les autres appels de `list_recordings.sh`) ne construisent aucune URL avec
+des crochets littéraux — vérifié, aucun autre correctif nécessaire.
+
 ## Contexte de cette session
 
 *(Section historique — voir « État actuel » ci-dessus pour la situation réelle.)*

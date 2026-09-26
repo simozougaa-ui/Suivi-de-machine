@@ -38,7 +38,10 @@ if [ -z "$OBJ" ]; then
   exit 1
 fi
 
-curl -sS -c "$JAR" -b "$JAR" "${AUTH[@]}" \
+# --globoff (-g) : l'URL contient condition.Types[0]=dav (littéral, requis
+# par le CGI Dahua) ; sans cette option, curl interprète [0] comme sa
+# propre syntaxe de génération d'URLs et échoue ("bad range in URL").
+curl -sS -g -c "$JAR" -b "$JAR" "${AUTH[@]}" \
   "${BASE}/cgi-bin/mediaFileFind.cgi?action=findFile&object=${OBJ}&condition.Channel=${INDEX}&condition.StartTime=${DAY}%2000:00:00&condition.EndTime=${DAY}%2023:59:59&condition.Types[0]=dav" \
   > /dev/null
 

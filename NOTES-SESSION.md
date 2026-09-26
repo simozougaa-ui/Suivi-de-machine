@@ -745,6 +745,48 @@ comparer `resume.json` à celui du test DMSS
 `signature_eval/resultats_dvr_reel_v2/README.md` pour les commandes
 exactes.
 
+### Correctif OOM `signature_eval/build_reference.py` (mise à jour du 2026-09-26)
+
+`build_reference.py` était tué par le système ("Killed") sur le Jetson en
+traitant les 1440 images DVR réelles (2026-09-23 13:21-13:45,
+1280x720) malgré 6,3 Gio de RAM libre.
+
+**Cause identifiée** : le script chargeait TOUTES les images en mémoire
+d'un coup (`[cv2.imread(p) for p in paths]`, ~3,8 Go pour 1440 images
+1280x720), puis `np.stack(...)` en faisait une **deuxième copie complète**
+pour les empiler avant `np.median` — les deux copies coexistant un
+instant, l'empreinte réelle atteignait près du double de 3,8 Go,
+dépassant les 6,3 Gio disponibles.
+
+**Correctif** : traitement par **lots** (`--lot`, 100 images par défaut
+≈ 260 Mo, marge large). Pour chaque lot : lecture, médiane du lot (calcul
+en float32, pas le float64 par défaut de numpy, pour limiter l'empreinte
+mémoire du tri interne), puis libération explicite avant le lot suivant.
+La référence finale est la **médiane des médianes de lot** — une
+approximation standard du calcul en flux d'une médiane globale, valable
+tant que le conducteur reste minoritaire dans chaque lot (cas normal sur
+24 minutes d'enregistrement). Avec `--lot` supérieur ou égal au nombre
+total d'images, un seul lot est utilisé et le résultat est la **médiane
+exacte** (comportement identique à l'ancienne version).
+
+**Vérifié** (57 vraies images caméra 15, seule taille disponible ici) :
+- Mode un seul lot vs calcul direct non optimisé (`np.median` sur toutes
+  les images chargées d'un coup) : résultat **identique au pixel près**
+  (diff = 0).
+- Mode multi-lots (6 lots de 10 images) vs médiane exacte : différence
+  négligeable (moyenne 0,46/255 par pixel/canal, seulement 0,17 % des
+  pixels avec un écart > 5/255, quelques pixels isolés jusqu'à 171 —
+  cohérent avec la contamination attendue par le conducteur ou un autre
+  élément mobile dans certains lots).
+
+**Reste à faire (sur le Jetson, pas testable ici sans les 1440 images
+réelles ni la contrainte mémoire du Jetson)** : relancer
+`build_reference.py` sur `signature_eval/resultats_dvr_reel/frames_extraites/`
+(1440 images) et confirmer que ça ne plante plus. Le réglage par défaut
+(`--lot 100`, ~14 lots pour 1440 images) devrait largement suffire ; si
+la mémoire le permet, un `--lot` plus grand (ex. 500-1440) rapproche le
+résultat de la médiane exacte, au prix d'un peu plus de mémoire par lot.
+
 ## Contexte de cette session
 
 *(Section historique — voir « État actuel » ci-dessus pour la situation réelle.)*

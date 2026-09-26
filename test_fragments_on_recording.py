@@ -77,13 +77,13 @@ def main():
             timestamp = start + timedelta(seconds=elapsed)
 
             try:
-                present, zone_results = tracker.update(frame, reference)
+                present, zone_results = tracker.update(frame, reference, timestamp)
             except Exception as exc:
                 print(f"Erreur detection: {exc}", flush=True)
                 continue
 
             zone_summary = " ".join(
-                f"{name}={ratio:.2f}{'*' if triggered else ' '}"
+                f"{name}={ratio:.2f}{'*' if triggered else ('~' if name in tracker.zones_en_attente else ' ')}"
                 for name, (ratio, triggered) in zone_results.items()
             )
             print(f"[{timestamp.strftime('%H:%M:%S')}] {'PRESENT' if present else 'absent '} {zone_summary}", flush=True)

@@ -271,6 +271,68 @@ conducteur reste plus de la moitié du temps au même endroit dans une
 fenêtre courte, la médiane l'intègre dans la référence et le rend
 invisible.
 
+### Durée minimum sur la zone convoyeur (mise à jour du 2026-09-26)
+
+**Problème** : un chemin de passage traverse la zone convoyeur
+(personnes, palettes sans lien avec la machine) → faux positifs sur de
+brefs passages.
+
+**Règle** : un changement dans la zone convoyeur ne compte comme présence
+que s'il persiste au moins `CONVOYEUR_DUREE_MIN_SEC = 4` secondes
+(constante en haut de `src/fragment_detection.py`). Tête, jambes et pile
+sont inchangées. Pendant ces 4 s, la zone est affichée en **orange** sur
+les vignettes de `contact_sheet.py` (seuil dépassé, durée pas encore
+atteinte) — un passage filtré se repère donc visuellement.
+
+**Implémentation choisie** :
+- Durée mesurée en **temps réel** entre la première et la dernière mesure
+  déclenchées consécutives (pas en nombre d'images), dans
+  `FragmentPresenceTracker`. Le tracker reçoit l'heure de chaque mesure :
+  heure de la vidéo en relecture (`contact_sheet.py`,
+  `test_fragments_on_recording.py`), horloge système en direct
+  (`main.py`, inchangé). Une seule mesure ne suffit jamais (durée nulle).
+- Le filtre s'applique **avant** le lissage existant (2 mesures sur 3) :
+  à 1 mesure/s, une présence est donc confirmée ~5 s après son début.
+  Conséquence : les sessions de `sessions.csv` commencent ~5 s après
+  l'arrivée réelle quand seule la zone convoyeur le voit (négligeable
+  devant la tolérance d'absence de 30 s).
+- **`contact_sheet.py` découplé** : la détection tourne à 1 image/s
+  (comme `main.py`) quel que soit `--pas`, qui ne règle plus que
+  l'intervalle entre vignettes. Sinon, avec `--pas 10`, une image toutes
+  les 10 s ne permet pas de distinguer un passage de 2 s d'une présence
+  de 9 s, et le filtre ne pourrait pas s'appliquer de façon cohérente.
+- **Limite `--depuis-dossier`** : seules les images sauvegardées (une par
+  `--pas`) existent, la détection ne peut donc tourner que sur elles.
+  Mesuré : avec des images toutes les 5 s, la présence de 10 s
+  (13:21:07–16) est **perdue** ; toutes les 2 s, elle est retrouvée. Le
+  script affiche un avertissement quand les images sont espacées de plus
+  de 2 s. Les pages produites en lecture directe du DVR font foi.
+  (Sauvegarder une image par seconde coûterait ~200 Mo par 20 min.)
+
+**Test** (DVR toujours injoignable depuis l'environnement de dev, donc
+pas l'enregistrement du 2026-09-23) : séquence reconstituée à partir de
+deux **vraies** captures de la caméra 15 — couloir vide, et conducteur
+dans la zone convoyeur (ratio 0.21, autres zones au repos) — rejouée à
+15 images/s à travers le vrai code de `contact_sheet.py` (seule
+l'ouverture du flux RTSP est simulée), heures calées sur la plage du
+2026-09-23 :
+
+| Événement | Sans filtre | Avec filtre 4 s (`--pas 10` et `--pas 5`) |
+|---|---|---|
+| Passage 3 s (13:20:50–52) | présent 13:20:51–53 (**faux positif**) | ignoré |
+| Conducteur 13:21:07–16 | présent 13:21:08–17 | **présent 13:21:12–17** |
+| Passage 2 s (13:21:25–26) | présent 13:21:26–27 (**faux positif**) | ignoré |
+| Reste de la minute (vide) | absent | absent |
+
+**Reste à faire sur le terrain** : aucun enregistrement avec des passages
+réels connus (< 4 s) dans la zone convoyeur n'était disponible ici. À
+vérifier depuis le Jetson : `test_fragments_on_recording.py --date
+2026-09-23 --debut 13:21:00 --duree 1440` (chronologie par seconde : `*` = zone
+comptée, `~` = seuil dépassé mais durée minimum pas encore atteinte ; un
+passage filtré apparaît en `convoyeur=0.xx~` sans `PRESENT`), et `contact_sheet.py` sur la même plage pour repérer les
+vignettes orange. Si de vrais passages durent plus de 4 s (palette
+poussée lentement), augmenter `CONVOYEUR_DUREE_MIN_SEC`.
+
 ## Contexte de cette session
 
 *(Section historique — voir « État actuel » ci-dessus pour la situation réelle.)*

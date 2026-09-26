@@ -38,6 +38,9 @@ test_fragments_on_recording.py / contact_sheet.py pour valider et
 réajuster ces zones et seuils sur des enregistrements réels.
 """
 
+import time
+from datetime import datetime
+
 import cv2
 import numpy as np
 
@@ -73,6 +76,16 @@ DIFF_THRESHOLD = 25  # écart de niveau de gris pour qu'un pixel compte comme "c
 BLUR_KERNEL = (5, 5)  # atténue le grain de compression et les petits reflets
 HISTORY_LENGTH = 3
 HISTORY_MIN_HITS = 2  # 2 detections sur les 3 dernieres mesures pour confirmer
+
+# Zone convoyeur uniquement : un chemin de passage la traverse (personnes,
+# palettes sans lien avec la machine). Un changement n'y compte comme
+# présence que s'il persiste au moins ce nombre de secondes, mesuré en
+# temps réel entre la première et la dernière mesure déclenchées
+# consécutives (pas en nombre d'images : le filtre reste le même quel que
+# soit le rythme d'échantillonnage). Il faut donc au moins 2 mesures ; en
+# dessous, c'est un passage rapide, ignoré.
+CONVOYEUR_DUREE_MIN_SEC = 4
+ZONES_AVEC_DUREE_MIN = {"convoyeur": CONVOYEUR_DUREE_MIN_SEC}
 
 
 def crop_zone(frame, zone):
@@ -173,17 +186,51 @@ def evaluate_zones(frame, reference):
     return result
 
 
+def _to_seconds(timestamp):
+    if timestamp is None:
+        return time.monotonic()
+    if isinstance(timestamp, datetime):
+        return timestamp.timestamp()
+    return float(timestamp)
+
+
 class FragmentPresenceTracker:
     """Lisse la détection brute sur les HISTORY_LENGTH dernières mesures,
-    pour ignorer un déclenchement isolé (reflet, ombre qui passe)."""
+    pour ignorer un déclenchement isolé (reflet, ombre qui passe), après
+    avoir appliqué la durée minimum des zones de ZONES_AVEC_DUREE_MIN.
+
+    `update(..., timestamp)` : heure de la mesure (datetime ou secondes).
+    Sans timestamp (cas de main.py, en direct), l'horloge du système est
+    utilisée. Pour rejouer un enregistrement, passer l'heure de la vidéo.
+
+    Dans les résultats par zone, une zone avec durée minimum n'est marquée
+    déclenchée qu'une fois la durée atteinte ; `zones_en_attente` liste
+    celles qui dépassent leur seuil mais pas encore leur durée.
+    """
 
     def __init__(self, history_length=HISTORY_LENGTH, min_hits=HISTORY_MIN_HITS):
         self.history_length = history_length
         self.min_hits = min_hits
         self._history = []
+        self._debut_declenchement = {}
+        self.zones_en_attente = set()
 
-    def update(self, frame, reference):
+    def _appliquer_duree_min(self, zone_results, now):
+        self.zones_en_attente = set()
+        for name, duree_min in ZONES_AVEC_DUREE_MIN.items():
+            ratio, triggered = zone_results[name]
+            if not triggered:
+                self._debut_declenchement.pop(name, None)
+                continue
+            debut = self._debut_declenchement.setdefault(name, now)
+            if now - debut >= duree_min:
+                continue
+            zone_results[name] = (ratio, False)
+            self.zones_en_attente.add(name)
+
+    def update(self, frame, reference, timestamp=None):
         zone_results = evaluate_zones(frame, reference)
+        self._appliquer_duree_min(zone_results, _to_seconds(timestamp))
         raw_present = any(triggered for _, triggered in zone_results.values())
 
         self._history.append(raw_present)

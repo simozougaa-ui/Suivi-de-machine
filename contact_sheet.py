@@ -57,8 +57,16 @@ PAGES_DIR = "contact_pages"
 FRAMES_DIR = "debug_frames"
 FRAME_FILENAME_RE = re.compile(r"^frame_(\d{2})(\d{2})(\d{2})\.jpg$")
 
+# La detection tourne a ~1 image/s (comme main.py) quel que soit --pas, qui
+# ne regle que l'intervalle entre vignettes : sinon, avec --pas 10, une
+# seule image par 10 s ne permettrait pas d'appliquer la duree minimum de
+# la zone convoyeur (4 s), et le lissage ne se comporterait pas comme en
+# production.
+DETECTION_INTERVAL_SECONDS = 1
+PENDING_COLOR = (0, 165, 255)  # orange : au-dessus du seuil, duree minimum pas encore atteinte
 
-def make_thumbnail(frame, present, zone_results, timestamp):
+
+def make_thumbnail(frame, present, zone_results, timestamp, zones_en_attente=()):
     """Recadre `frame` sur CROP, agrandit, et dessine par-dessus le
     bandeau de statut + les 3 zones (rouge si déclenchée) + leur ratio."""
     x1, y1, x2, y2 = CROP
@@ -73,7 +81,12 @@ def make_thumbnail(frame, present, zone_results, timestamp):
 
     for name, (zx1, zy1, zx2, zy2) in ZONES.items():
         ratio, triggered = zone_results.get(name, (0.0, False))
-        color = (0, 0, 255) if triggered else (0, 200, 0)
+        if triggered:
+            color = (0, 0, 255)
+        elif name in zones_en_attente:
+            color = PENDING_COLOR
+        else:
+            color = (0, 200, 0)
         lx1, ly1 = to_local(zx1, zy1)
         lx2, ly2 = to_local(zx2, zy2)
         cv2.rectangle(thumb, (lx1, ly1), (lx2, ly2), color, 2)
@@ -118,25 +131,29 @@ def write_pages(thumbnails):
 
 
 def process_samples(sample_iter, reference, source_dir=None):
-    """Consomme un itérateur de (timestamp, frame) plein cadre : sauvegarde
-    optionnellement chaque frame source, calcule la détection, et
-    construit les vignettes. Retourne la liste des vignettes."""
+    """Consomme un itérateur de (timestamp, frame, vignette) plein cadre :
+    calcule la détection sur chaque image, et pour celles marquées
+    `vignette`, sauvegarde optionnellement l'image source et construit la
+    vignette. Retourne la liste des vignettes."""
     tracker = FragmentPresenceTracker()
     thumbnails = []
 
-    for timestamp, frame in sample_iter:
+    for timestamp, frame, is_thumb in sample_iter:
+        try:
+            present, zone_results = tracker.update(frame, reference, timestamp)
+        except Exception as exc:
+            print(f"Erreur detection a {timestamp.strftime('%H:%M:%S')}: {exc}", flush=True)
+            continue
+
+        if not is_thumb:
+            continue
+
         if source_dir is not None:
             os.makedirs(source_dir, exist_ok=True)
             frame_path = os.path.join(source_dir, f"frame_{timestamp.strftime('%H%M%S')}.jpg")
             cv2.imwrite(frame_path, frame, [cv2.IMWRITE_JPEG_QUALITY, 92])
 
-        try:
-            present, zone_results = tracker.update(frame, reference)
-        except Exception as exc:
-            print(f"Erreur detection a {timestamp.strftime('%H:%M:%S')}: {exc}", flush=True)
-            continue
-
-        thumbnails.append(make_thumbnail(frame, present, zone_results, timestamp))
+        thumbnails.append(make_thumbnail(frame, present, zone_results, timestamp, tracker.zones_en_attente))
         print(f"  vignette {len(thumbnails)} : {timestamp.strftime('%H:%M:%S')} {'PRESENT' if present else 'absent'}", flush=True)
 
     return thumbnails
@@ -150,8 +167,10 @@ def sample_from_recording(jour, debut_heure, duree, pas):
     capture = open_stream(url)
 
     frame_count = 0
-    next_sample_frame = 0
-    step_frames = max(1, int(pas * ASSUMED_FPS))
+    next_detection_frame = 0
+    next_thumb_frame = 0
+    detection_step = max(1, int(DETECTION_INTERVAL_SECONDS * ASSUMED_FPS))
+    thumb_step = max(1, int(pas * ASSUMED_FPS))
 
     try:
         while True:
@@ -160,13 +179,17 @@ def sample_from_recording(jour, debut_heure, duree, pas):
                 break
             frame_count += 1
 
-            if frame_count < next_sample_frame:
+            if frame_count < next_detection_frame:
                 continue
-            next_sample_frame = frame_count + step_frames
+            next_detection_frame = frame_count + detection_step
+
+            is_thumb = frame_count >= next_thumb_frame
+            if is_thumb:
+                next_thumb_frame = frame_count + thumb_step
 
             elapsed = frame_count / ASSUMED_FPS
             timestamp = start + timedelta(seconds=elapsed)
-            yield timestamp, frame
+            yield timestamp, frame, is_thumb
     finally:
         capture.release()
 
@@ -190,6 +213,22 @@ def sample_from_folder(folder):
     if not filenames:
         raise ValueError(f"Aucune image frame_HHMMSS.jpg trouvee dans {folder}.")
 
+    secondes = sorted(
+        int(h) * 3600 + int(m) * 60 + int(s)
+        for h, m, s in (FRAME_FILENAME_RE.match(f).groups() for f in filenames)
+    )
+    ecarts = [b - a for a, b in zip(secondes, secondes[1:])]
+    ecart = sorted(ecarts)[len(ecarts) // 2] if ecarts else 0
+    if ecart > 2:
+        print(
+            f"ATTENTION: images espacees de {ecart}s dans ce dossier. La detection "
+            "n'est evaluee que sur ces images (pas 1/s comme en lecture directe du "
+            "DVR) : la duree minimum de la zone convoyeur et le lissage "
+            "risquent de manquer des presences courtes (~10s). Les pages "
+            "produites en lecture directe du DVR font foi.",
+            flush=True,
+        )
+
     for filename in filenames:
         match = FRAME_FILENAME_RE.match(filename)
         hh, mm, ss = match.groups()
@@ -200,7 +239,7 @@ def sample_from_folder(folder):
         if frame is None:
             print(f"ATTENTION: image illisible, ignoree: {filename}", flush=True)
             continue
-        yield timestamp, frame
+        yield timestamp, frame, True
 
 
 def main():

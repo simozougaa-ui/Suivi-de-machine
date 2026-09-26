@@ -31,12 +31,27 @@ Méthode (choisie et justifiée dans NOTES-SESSION.md) :
    (le même conducteur, au même endroit) contre ~16 pour un autre ouvrier
    (chemise bleue) — un rapport signal/bruit ~10x meilleur.
 
-Usage :
+Usage (une seule image de référence) :
     python3 signature_eval/signature.py \
         --frames-dir <dossier images> --reference <image machine vide> \
         --signature-image <image> --signature-box x1,y1,x2,y2 \
         --occluded-list <fichier .txt, un nom de fichier par ligne> \
         --out-dir signature_eval/out
+
+Usage (plusieurs images de référence, recommandé — voir
+select_candidates.py pour générer le manifeste automatiquement) :
+    python3 signature_eval/signature.py \
+        --frames-dir <dossier images> --reference <image machine vide> \
+        --signature-manifest <fichier .csv : image,x1,y1,x2,y2 par ligne> \
+        --occluded-list <fichier .txt, un nom de fichier par ligne> \
+        --out-dir signature_eval/out
+
+Avec plusieurs images de référence, la signature retenue est la MÉDIANE
+des couleurs mesurées sur chaque candidat (plus robuste qu'un seul
+exemple), et la cohérence ENTRE les candidats est elle-même rapportée
+(distance_ab_intra_signature_*) : si les candidats sont bien tous le même
+conducteur, cette distance doit être petite, comme pour les images
+convoyeur entre elles.
 """
 
 import argparse
@@ -125,13 +140,19 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--frames-dir", required=True)
     ap.add_argument("--reference", required=True, help="image 'machine vide' (même résolution)")
-    ap.add_argument("--signature-image", required=True, help="nom de fichier (dans frames-dir) où le conducteur est visible ailleurs")
-    ap.add_argument("--signature-box", required=True, help="x1,y1,x2,y2 de la personne dans signature-image")
+    ap.add_argument("--signature-image", help="(mode 1 image) nom de fichier où le conducteur est visible ailleurs")
+    ap.add_argument("--signature-box", help="(mode 1 image) x1,y1,x2,y2 de la personne dans signature-image")
+    ap.add_argument("--signature-manifest",
+                    help="(mode plusieurs images, recommandé) fichier .csv : une ligne "
+                         "'image,x1,y1,x2,y2' par candidat (voir select_candidates.py)")
     ap.add_argument("--occluded-list", required=True, help="fichier texte : un nom de fichier par ligne (images convoyeur)")
     ap.add_argument("--control-image", help="nom de fichier d'une autre personne (ex. ouvrier du fond), pour tester la confusion")
     ap.add_argument("--control-box", help="x1,y1,x2,y2 de cette autre personne")
     ap.add_argument("--out-dir", default=os.path.join(HERE, "out"))
     args = ap.parse_args()
+
+    if not args.signature_manifest and not (args.signature_image and args.signature_box):
+        ap.error("fournir --signature-manifest, ou --signature-image + --signature-box")
 
     os.makedirs(args.out_dir, exist_ok=True)
     reference = cv2.imread(args.reference)
@@ -149,19 +170,52 @@ def main():
         return tuple(int(v) for v in s.split(","))
 
     # --- 1. Signature du conducteur, mesurée ailleurs sur la machine ---
-    sig_box = parse_box(args.signature_box)
-    sig_frame = load(args.signature_image)
-    sig_mask = foreground_mask(sig_frame, reference, sig_box)
-    sig_color = median_color_lab(sig_frame, sig_box, sig_mask)
-    sig_pixels = int(sig_mask.sum())
-    print(f"[signature] {args.signature_image} boite={sig_box} "
-          f"pixels_masque={sig_pixels} couleur_Lab={sig_color}", flush=True)
-    cv2.imwrite(
-        os.path.join(args.out_dir, "signature_source.jpg"),
-        annotate(sig_frame, sig_box, sig_mask,
-                  [f"signature conducteur : {os.path.basename(args.signature_image)}",
-                   f"Lab={np.round(sig_color, 1).tolist()}  pixels={sig_pixels}"]),
-        [cv2.IMWRITE_JPEG_QUALITY, 90])
+    # Un ou plusieurs candidats (--signature-manifest) : chaque candidat
+    # donne sa propre couleur médiane ; la signature retenue est la médiane
+    # DE CES COULEURS (plus robuste qu'un seul exemple), et la cohérence
+    # entre candidats est rapportée (doit être petite si c'est bien
+    # toujours le même conducteur - même logique que la cohérence
+    # intra-convoyeur ci-dessous).
+    if args.signature_manifest:
+        candidats_brut = []
+        with open(args.signature_manifest) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                name, x1, y1, x2, y2 = line.split(",")
+                candidats_brut.append((name, (int(x1), int(y1), int(x2), int(y2))))
+    else:
+        candidats_brut = [(args.signature_image, parse_box(args.signature_box))]
+
+    signature_candidats = []
+    for i, (name, box) in enumerate(candidats_brut):
+        frame = load(name)
+        mask = foreground_mask(frame, reference, box)
+        color = median_color_lab(frame, box, mask)
+        n_px = int(mask.sum())
+        if color is None:
+            print(f"[signature] {name} boite={box} : aucun pixel de masque, candidat ignoré", flush=True)
+            continue
+        signature_candidats.append({"image": name, "box": box, "Lab": color.tolist(), "pixels": n_px})
+        print(f"[signature] {name} boite={box} pixels_masque={n_px} couleur_Lab={color}", flush=True)
+        if i < 10:
+            cv2.imwrite(
+                os.path.join(args.out_dir, f"signature_{i+1:02d}_{os.path.splitext(os.path.basename(name))[0]}.jpg"),
+                annotate(frame, box, mask,
+                          [f"signature conducteur #{i+1} : {os.path.basename(name)}",
+                           f"Lab={np.round(color, 1).tolist()}  pixels={n_px}"]),
+                [cv2.IMWRITE_JPEG_QUALITY, 90])
+
+    if not signature_candidats:
+        raise SystemExit("Aucun candidat de signature exploitable (masque vide sur tous).")
+
+    sig_colors_arr = np.array([c["Lab"] for c in signature_candidats])
+    sig_color = np.median(sig_colors_arr, axis=0)
+    sig_pixels = int(np.sum([c["pixels"] for c in signature_candidats]))
+    intra_sig_ab = [ab_distance(c, sig_color) for c in sig_colors_arr]
+    print(f"[signature] {len(signature_candidats)} candidat(s) -> couleur retenue (médiane) Lab={sig_color} "
+          f"cohérence_ab_intra: moyenne={np.mean(intra_sig_ab):.1f} max={np.max(intra_sig_ab):.1f}", flush=True)
 
     # --- 2. Témoin (autre ouvrier), pour vérifier qu'on ne confond pas ---
     ctrl_color = None
@@ -229,8 +283,11 @@ def main():
     # Calculé en Lab complet ET en chrominance seule (a, b), pour montrer
     # l'effet du choix de métrique (voir NOTES-SESSION.md).
     summary = {
+        "signature_candidats": signature_candidats,
         "signature_conducteur_Lab": sig_color.tolist() if sig_color is not None else None,
         "signature_pixels": sig_pixels,
+        "distance_ab_intra_signature_moyenne": float(np.mean(intra_sig_ab)),
+        "distance_ab_intra_signature_max": float(np.max(intra_sig_ab)),
         "temoin_autre_ouvrier_Lab": ctrl_color.tolist() if ctrl_color is not None else None,
         "n_images_convoyeur": len(names),
         "n_avec_pixels_visibles": len(colors),

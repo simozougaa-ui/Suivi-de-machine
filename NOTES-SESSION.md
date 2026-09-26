@@ -677,6 +677,74 @@ fichier (`FRAME_RE`), donc inchangées et correctes quel que soit le
 dossier. Testé avec deux images réelles renommées `frame_HHMMSS.jpg` sans
 date dans le nom du dossier : horodatages corrects, plus d'exception.
 
+### Signature multi-référence sur flux DVR réel (mise à jour du 2026-09-26, données introuvables)
+
+Demande : refaire le test de signature de couleur sur les 1440 images
+DVR réelles (2026-09-23 13:21-13:45) censées être dans
+`signature_eval/resultats_dvr_reel/frames_extraites/`, avec plusieurs
+candidats "conducteur ailleurs" choisis automatiquement à partir du
+`detections.csv` YOLO censé être dans `yolo_eval/out/frames_extraites/`.
+
+**Ces fichiers sont introuvables dans cet environnement** : recherche
+faite sur le disque local (dossier de travail, scratchpad de session) et
+sur le dépôt Git, y compris après `git fetch origin main` (aucun nouveau
+commit, ces chemins ne sont ni dans l'historique ni sur la branche
+distante). Aucune commande de la tâche précédente n'a donc pu être
+exécutée par personne dans le dépôt visible ici. Rappel : ces sorties
+(`yolo_eval/out/`, `signature_eval/frames_dvr_*/`) sont volontairement
+gitignorées (volumineuses, régénérées à la demande) — si elles ont été
+produites sur le Jetson, elles y restent tant qu'on ne les récupère pas
+explicitement ; ce n'est pas automatique.
+
+**Conséquence** : impossible de produire la comparaison demandée
+(candidats retenus, taux de correspondance, comparaison avec le test
+DMSS) — ce serait inventer des résultats. Ce qui suit est l'outillage
+préparé et testé, prêt à être utilisé dès que ces données seront
+disponibles (sur le Jetson, ou remontées ici).
+
+**Outillage ajouté (testé, aucun fichier de production touché)** :
+
+- **`signature_eval/signature.py` accepte maintenant plusieurs images de
+  référence** via `--signature-manifest <fichier.csv>` (lignes
+  `image,x1,y1,x2,y2`), en plus du mode à une seule image
+  (`--signature-image`/`--signature-box`, conservé et **rétrocompatible**
+  - revérifié : mêmes résultats qu'avant sur les captures DMSS,
+  distance_ab_moyenne_convoyeur_vs_signature = 8.6, identique). La
+  signature retenue devient la **médiane des couleurs mesurées sur
+  chaque candidat** (plus robuste qu'un seul exemple), et une nouvelle
+  métrique `distance_ab_intra_signature_*` mesure la cohérence ENTRE les
+  candidats eux-mêmes (doit être petite si ce sont bien tous le même
+  conducteur — sert de garde-fou à la vérification visuelle demandée à
+  l'étape 2).
+- **`signature_eval/select_candidates.py`** : lit un `detections.csv`
+  produit par `eval_yolo.py` et sélectionne automatiquement des candidats
+  "ailleurs sur la machine, **hors zone convoyeur**" (la zone
+  `zone_machine` d'`eval_yolo.py` est l'union des 4 zones y compris le
+  convoyeur — ce script exclut explicitement le rectangle convoyeur pour
+  ne garder que les vraies détections "ailleurs"), répartis dans le temps
+  (une par tranche de la plage étudiée, la plus confiante). Testé avec un
+  CSV synthétique reproduisant le format exact d'`eval_yolo.py` (5 lignes,
+  dont une détection au convoyeur à exclure et une ligne à 2 boîtes) :
+  sélection correcte des 3 candidats attendus, exclusion correcte du
+  convoyeur.
+- `yolo_eval/eval_yolo.py` n'a pas été modifié (déjà suffisant pour
+  produire le `detections.csv` consommé par `select_candidates.py`).
+- `signature_eval/resultats_dvr_reel_v2/` créé avec le mode d'emploi
+  complet (commandes exactes), en attente des vraies données ; les
+  résultats existants (`resultats_2026-09-26/`, `resultats_dvr_reel/`) ne
+  sont pas modifiés.
+
+**Ce qui reste à faire, une fois les données disponibles (sur le
+Jetson)** : lancer `select_candidates.py`, **vérifier visuellement**
+chaque candidat retenu (étape 2 de la demande, non automatisable),
+construire la référence "machine vide" à partir des mêmes frames DVR
+(`build_reference.py`), relister les 15 instants convoyeur avec les noms
+de fichiers réels, puis lancer `signature.py --signature-manifest` et
+comparer `resume.json` à celui du test DMSS
+(`resultats_2026-09-26/resume.json`) — voir
+`signature_eval/resultats_dvr_reel_v2/README.md` pour les commandes
+exactes.
+
 ## Contexte de cette session
 
 *(Section historique — voir « État actuel » ci-dessus pour la situation réelle.)*

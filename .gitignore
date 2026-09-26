@@ -21,3 +21,10 @@ dist/
 # regenerees a la demande depuis le DVR ou --depuis-dossier)
 contact_pages/
 debug_frames/
+
+# Evaluation YOLO isolee (yolo_eval/) : modeles exportes, sorties, journaux
+*.onnx
+*.engine
+yolo_eval/out/
+yolo_eval/*.log
+yolo_eval/env.txt

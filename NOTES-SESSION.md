@@ -333,6 +333,91 @@ passage filtré apparaît en `convoyeur=0.xx~` sans `PRESENT`), et `contact_shee
 vignettes orange. Si de vrais passages durent plus de 4 s (palette
 poussée lentement), augmenter `CONVOYEUR_DUREE_MIN_SEC`.
 
+### Évaluation YOLO isolée (mise à jour du 2026-09-26)
+
+But : savoir si un vrai détecteur de personne peut remplacer ou compléter
+la détection par fragments. Tout est dans `yolo_eval/` (voir son README) ;
+**aucun fichier de production n'a été modifié**.
+
+**Contrainte** : l'environnement de développement n'a accès ni au Jetson
+ni au DVR (Tailscale injoignable). L'enregistrement du 2026-09-23 et les
+FPS du Jetson n'ont donc **pas** pu être mesurés ici : le kit fournit les
+commandes à lancer sur le Jetson. La qualité de détection a été mesurée
+sur **57 vraies images distinctes de la caméra 15** (2026-09-05
+11:48–12:00, 1280x720), dont **15 avec le conducteur au convoyeur**,
+vérifiées à l'œil.
+
+**Choix (décidés sans validation, justifiés par les mesures ci-dessous)**
+
+- **Modèle YOLO11n** : même coût que YOLOv8n, un peu meilleur ; 11s/11m
+  gagnent 1 à 4 détections sur 57 pour 2 à 6 fois plus de calcul.
+- **imgsz 1280** : les personnes sont petites dans cette vue ; à 640,
+  l'ouvrier du fond est vu 0 à 4 fois sur 57, à 1280 43 fois.
+- **conf 0.30** : élimine la seule boîte douteuse (tache sombre de
+  l'escalier, 0.25–0.29) sans perdre de vraies personnes.
+- **Format** : PyTorch pour l'évaluation, plus un moteur **TensorRT FP16**
+  construit avec `trtexec` de JetPack (le `torch` de PyPI ne voit pas le GPU
+  Orin, donc ultralytics tourne sur CPU sur le Jetson ; trtexec mesure le
+  débit GPU réel sans dépendre de torch).
+- **venv isolé** `yolo_eval/.venv` (`--system-site-packages` pour voir le
+  module tensorrt de JetPack), `ultralytics==8.4.162`.
+
+**Qualité mesurée (57 images réelles)**
+
+| Modèle / imgsz | Conducteur au convoyeur (15) | Ouvrier du fond vu (57) | Temps CPU dev / image |
+|---|---|---|---|
+| YOLOv8n 640 | 0 (1 à conf 0.10) | 0 | 45 ms |
+| YOLO11n 640 | 0 | 4 | 43 ms |
+| YOLOv8n 1280 | 0 | 43 | 104 ms |
+| **YOLO11n 1280** | **0** | **43** | **101 ms** |
+| YOLO11s 1280 | 0 | 44 | 227 ms |
+| YOLO11m 1280 | 0 | 47 | 621 ms |
+
+- **Conducteur au convoyeur : 0/15, quel que soit le modèle** (aucune
+  boîte, même à conf 0.10). Il est penché, vu de haut, coupé par la
+  poutre et le poteau, souvent caché par les feuilles qu'il porte : ce
+  n'est pas une silhouette de personne pour un modèle COCO générique.
+  C'est exactement le cas que la détection par fragments rattrape.
+- **Personnes debout bien visibles : détectées** — ouvrier en bleu au fond
+  (0.36–0.71), ouvrier à droite (0.28–0.40), passant au premier plan (0.56),
+  personne debout derrière la tête de la machine (0.36–0.42, seul cas
+  détecté dans la zone machine).
+- **Faux positifs** : aucune partie de la machine prise pour une personne ;
+  une seule boîte douteuse (escalier, < 0.30, éliminée par le seuil).
+- Test bout en bout de `eval_yolo.py` (20 images, CPU de dev) : 108 ms/image
+  soit **9,3 FPS sur ce CPU** ; 13:21:07 (conducteur présent) = non détecté.
+- Images : `yolo_eval/resultats_2026-09-26/` (15 vignettes conducteur sans
+  aucune boîte, planche des boîtes trouvées, deux exemples annotés).
+
+**FPS sur le Jetson : à mesurer** (commandes ci-dessous). Estimation : CPU
+ARM du Jetson plus lent que celui de dev, donc probablement 2–5 FPS en
+PyTorch CPU à 1280, et nettement plus en TensorRT FP16 sur GPU. Attention :
+sur CPU, YOLO concurrence le service `suivi-presence` ; ~1,5 Go de RAM en
+plus pendant le test.
+
+**Recommandation**
+
+1. **Ne pas remplacer** la détection par fragments par un YOLO générique :
+   il rate systématiquement le conducteur dans la position qui compte.
+2. YOLO peut servir en **complément** pour les personnes debout (passants,
+   autres ouvriers), par exemple pour confirmer/écarter une présence ; pas
+   prioritaire.
+3. Pour que YOLO voie vraiment le conducteur : **entraîner un petit YOLO
+   (11n) sur des images de cette caméra** annotées à la main
+   (quelques centaines d'images tirées de `debug_frames/`), puis l'exporter
+   en TensorRT ; ou améliorer l'angle de caméra.
+
+**Commandes à lancer sur le Jetson**
+
+```bash
+cd ~/suivi-de-machine && git pull
+bash yolo_eval/check_env.sh | tee yolo_eval/env.txt
+bash yolo_eval/setup_venv.sh
+bash yolo_eval/bench_tensorrt.sh
+yolo_eval/.venv/bin/python yolo_eval/eval_yolo.py --date 2026-09-23 --debut 13:21:00 --duree 1440
+python3 -m http.server 8001 --directory yolo_eval/out   # puis http://100.116.160.30:8001/
+```
+
 ## Contexte de cette session
 
 *(Section historique — voir « État actuel » ci-dessus pour la situation réelle.)*

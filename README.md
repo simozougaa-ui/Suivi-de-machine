@@ -141,6 +141,13 @@ sudo systemctl restart suivi-presence                      # prise en compte de 
 
 Les pages sont visibles depuis le téléphone sur `/contact`.
 
+## Évaluation YOLO isolée (test, hors production)
+
+Le dossier `yolo_eval/` contient un test séparé d'un détecteur de personne
+YOLO11n (venv isolé, TensorRT) sur la caméra 15. Il ne touche pas au
+service en production. Mode d'emploi : `yolo_eval/README.md` ; résultats
+et recommandation : `NOTES-SESSION.md`.
+
 ## Outils de débogage visuel (depuis le tableau de bord, port 8000)
 
 | Chemin | Contenu |

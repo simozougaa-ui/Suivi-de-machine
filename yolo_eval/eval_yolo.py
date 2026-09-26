@@ -81,7 +81,17 @@ def frames_from_recording(jour, debut, duree, pas):
 
 def frames_from_folder(folder):
     base = os.path.basename(folder.rstrip("/"))
-    jour = datetime.strptime(base.split("_")[0], "%Y-%m-%d").date()
+    try:
+        # Dossiers style debug_frames/AAAA-MM-JJ_HHMMSS/frame_HHMMSS.jpg
+        jour = datetime.strptime(base.split("_")[0], "%Y-%m-%d").date()
+    except ValueError:
+        # Dossiers sans date dans le nom (ex. frames extraites par
+        # signature_eval/extract_frames_dvr.py : frame_HHMMSS.jpg, sans
+        # date dans le nom du dossier). La date n'est utilisée que pour
+        # construire l'horodatage affiché/sauvegardé (moments clés, noms
+        # d'images) ; elle n'entre dans aucun calcul de détection - la
+        # date du jour du traitement est un défaut inoffensif ici.
+        jour = datetime.now().date()
     for name in sorted(os.listdir(folder)):
         m = FRAME_RE.match(name)
         if not m:

@@ -660,6 +660,23 @@ appel curl. Les autres appels curl du dépôt (`dvr_check/check_stream_config.sh
 les autres appels de `list_recordings.sh`) ne construisent aucune URL avec
 des crochets littéraux — vérifié, aucun autre correctif nécessaire.
 
+### Correctif `yolo_eval/eval_yolo.py` : dossiers `frame_HHMMSS.jpg` sans date (mise à jour du 2026-09-26)
+
+`frames_from_folder` plantait (`ValueError: time data 'frames' does not
+match format '%Y-%m-%d'`) sur les dossiers produits par
+`signature_eval/extract_frames_dvr.py`, nommés librement (pas
+`AAAA-MM-JJ_HHMMSS` comme `debug_frames/`) et contenant des fichiers
+`frame_HHMMSS.jpg` sans date.
+
+**Correctif** : si le nom du dossier ne commence pas par une date
+`AAAA-MM-JJ`, utilise la date du jour du traitement comme repli. Sans
+risque : la date ne sert qu'à construire l'horodatage affiché/sauvegardé
+(moments clés, noms des images annotées), jamais la logique de
+détection ; les heures HH:MM:SS restent lues depuis le nom de chaque
+fichier (`FRAME_RE`), donc inchangées et correctes quel que soit le
+dossier. Testé avec deux images réelles renommées `frame_HHMMSS.jpg` sans
+date dans le nom du dossier : horodatages corrects, plus d'exception.
+
 ## Contexte de cette session
 
 *(Section historique — voir « État actuel » ci-dessus pour la situation réelle.)*

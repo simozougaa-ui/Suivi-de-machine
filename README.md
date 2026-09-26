@@ -179,6 +179,11 @@ caméra 15 en mainstream (HD) ou substream (SD). Mode d'emploi :
 - [x] Détection par fragments (méthode par défaut) — code et zones en
       place, **validation sur enregistrement réel restant à faire** (voir
       `NOTES-SESSION.md`, section « Détection par fragments »).
+- [x] Pistes complémentaires évaluées pour le conducteur au convoyeur
+      (YOLO seul insuffisant ; signature de couleur des vêtements
+      prometteuse et confirmée sur images DVR natives, mais **pas encore
+      déployable en l'état** — voir `yolo_eval/`, `signature_eval/` et
+      `NOTES-SESSION.md`, section « Signature de couleur : conclusion »).
 - [ ] Validation chiffrée (taux de bonnes détections) sur au moins 20 min
       d'enregistrement réel, et ajustement des seuils si besoin.
 - [ ] Intégration de l'envoi des résultats vers l'API

@@ -787,6 +787,100 @@ réelles ni la contrainte mémoire du Jetson)** : relancer
 la mémoire le permet, un `--lot` plus grand (ex. 500-1440) rapproche le
 résultat de la médiane exacte, au prix d'un peu plus de mémoire par lot.
 
+### Signature de couleur : conclusion (mise à jour du 2026-09-26)
+
+Synthèse des deux tests menés (détail de chacun dans les sections
+précédentes) :
+
+| | Test 1 — captures DMSS (05/09) | Test 2 — images DVR natives (23/09) |
+|---|---|---|
+| Source des images | captures d'écran de l'appli DMSS, redimensionnées à la main (doublement compressées) | flux DVR mainstream réel, 1280x720, aucune recompression manuelle |
+| Images de référence ("conducteur ailleurs") | 1 (trouvée par hasard, non confirmée comme étant sûrement le conducteur) | 3 (sélectionnées automatiquement par `select_candidates.py`, **vérifiées visuellement** comme étant bien le conducteur) |
+| Instants convoyeur testés | 15 | 10 |
+| Cohérence intra-convoyeur (a,b) | 1,7 (max 2,8) | 1,44 (max 3,49) |
+| Cohérence intra-référence (a,b) | non calculable (1 seule image) | 2,75 (max 6,0) |
+| Écart signature ↔ convoyeur | 8,6 | **4,19** |
+| Écart vs témoin (autre ouvrier) | 16,1 | non remesuré dans ce second test |
+| Correspondances au seuil (8,0) | 8/15 | **10/10** |
+
+Résultats détaillés du test 2 (JSON, logs) : produits sur le Jetson dans
+`signature_eval/out_dvr_reel_v2/` — ce dossier est un dossier de travail
+(comme `signature_eval/out/`), **pas encore recopié** dans
+`signature_eval/resultats_dvr_reel_v2/` (git), qui ne contient pour
+l'instant que le mode d'emploi. À faire en suivi : copier le sous-ensemble
+pertinent (resume.json, quelques images annotées) comme pour les tests
+précédents, pour que la trace chiffrée soit consultable depuis le dépôt.
+
+**Pourquoi la meilleure qualité source améliore le résultat** : l'écart
+signature/convoyeur passe de 8,6 à 4,19 (environ 2 fois plus net), et le
+taux de correspondance au seuil passe de 8/15 à 10/10. Deux causes
+cumulées, cohérentes avec les limites déjà identifiées :
+1. **Moins de bruit de compression** : les captures DMSS subissaient une
+   double compression (encodage DMSS + capture d'écran + redimensionnement
+   manuel à la volée), qui aplatit et bruite la chrominance — la source
+   du problème de "luminance instable" documenté dans le test 1. Les
+   images DVR natives évitent cette perte.
+2. **Plusieurs références au lieu d'une** : la signature du test 2 est la
+   médiane de 3 mesures (vérifiées) plutôt qu'un seul exemple non
+   confirmé — mécaniquement plus robuste à une mesure isolée biaisée
+   (reflet, angle, ombre).
+
+**Verdict : la méthode est significativement renforcée, mais n'est pas
+encore considérée comme validée pour un déploiement en production.**
+Réserves qui subsistent :
+- **Volume de données toujours limité** : 3 références + 10 instants
+  convoyeur, un seul jour, une seule plage horaire (24 minutes) — pas de
+  test sur plusieurs jours, éclairages (matin/après-midi/nuit), ou
+  saisons de vêtements différentes.
+- **Pas de témoin (autre ouvrier) remesuré sur ce second test** : le test
+  1 avait montré une séparation ~2x envers un autre ouvrier (chemise
+  bleue) ; ce résultat n'a pas été reconfirmé avec la méthode/qualité
+  actuelle sur le test 2. Tant que ce n'est pas refait, le risque de
+  confusion avec un autre ouvrier portant une couleur proche reste
+  non quantifié sur données récentes.
+- **Seuil (8,0) toujours choisi à la main**, pas calibré statistiquement
+  sur un jeu de données assez large pour fixer un taux de faux positifs/
+  négatifs cible.
+- **Un seul conducteur suivi pour l'instant** : la méthode n'a pas été
+  pensée ni testée pour plusieurs conducteurs/machines en parallèle.
+- **Robustesse au changement de tenue non testée** : la signature suppose
+  la même tenue d'un jour à l'autre ; rien ne détecte ni ne compense un
+  changement (vêtement différent, saison).
+
+### Recommandation d'intégration
+
+**Ne pas remplacer la détection par fragments** (méthode de production
+actuelle) par la signature de couleur — celle-ci reste un signal
+complémentaire, pas un remplacement :
+
+1. **Niveau d'intégration proposé** : à l'intérieur de
+   `src/fragment_detection.py`, comme **confirmation optionnelle** sur
+   les sessions déclenchées par la zone convoyeur (celle où YOLO échoue
+   et où la fragmentation seule ne dit rien sur l'identité). Concrètement
+   : quand une présence convoyeur est confirmée (durée minimum atteinte),
+   calculer la signature de couleur de la zone et l'enregistrer comme un
+   champ supplémentaire de la session (`sessions.csv`), sans jamais
+   bloquer ni invalider la détection de présence elle-même — un ajout
+   d'information, pas une nouvelle condition.
+2. **Étapes techniques nécessaires avant tout déploiement réel** :
+   - Reconstituer un jeu de validation plus large (plusieurs jours,
+     plusieurs plages horaires) avec, à chaque fois, un témoin (autre
+     ouvrier) mesuré pour reconfirmer la séparation signature/témoin sur
+     données récentes.
+   - Recalibrer `MATCH_THRESHOLD_AB` statistiquement sur ce jeu élargi
+     plutôt qu'à la main.
+   - Automatiser le **réenrôlement** de la signature en début de poste
+     (via `select_candidates.py` + vérification visuelle rapide), pour
+     absorber un changement de tenue d'un jour à l'autre sans casser la
+     détection.
+   - Si plusieurs conducteurs/machines doivent un jour être suivis en
+     parallèle, prévoir une signature par machine/poste (pas un
+     changement structurel majeur, mais à concevoir avant d'étendre).
+   - Faire tourner le calcul de signature en tâche de fond (asynchrone)
+     sur le Jetson pendant quelques jours, en loggant seulement (sans
+     agir dessus), pour comparer a posteriori aux observations humaines
+     avant de lui donner un rôle actif dans le tableau de bord.
+
 ## Contexte de cette session
 
 *(Section historique — voir « État actuel » ci-dessus pour la situation réelle.)*

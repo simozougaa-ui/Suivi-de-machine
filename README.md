@@ -148,6 +148,13 @@ YOLO11n (venv isolé, TensorRT) sur la caméra 15. Il ne touche pas au
 service en production. Mode d'emploi : `yolo_eval/README.md` ; résultats
 et recommandation : `NOTES-SESSION.md`.
 
+## Évaluation d'une signature de couleur (test, hors production)
+
+Le dossier `signature_eval/` teste si la couleur des vêtements peut aider
+à identifier le conducteur là où YOLO échoue. Mode d'emploi :
+`signature_eval/README.md` ; résultats et recommandation :
+`NOTES-SESSION.md`.
+
 ## Outils de débogage visuel (depuis le tableau de bord, port 8000)
 
 | Chemin | Contenu |

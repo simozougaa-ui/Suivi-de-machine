@@ -28,3 +28,6 @@ debug_frames/
 yolo_eval/out/
 yolo_eval/*.log
 yolo_eval/env.txt
+
+# Evaluation signature de couleur isolee (signature_eval/) : sorties de travail
+signature_eval/out/

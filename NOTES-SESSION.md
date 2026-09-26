@@ -418,6 +418,112 @@ yolo_eval/.venv/bin/python yolo_eval/eval_yolo.py --date 2026-09-23 --debut 13:2
 python3 -m http.server 8001 --directory yolo_eval/out   # puis http://100.116.160.30:8001/
 ```
 
+### Évaluation d'une signature de couleur vestimentaire (mise à jour du 2026-09-26)
+
+Suite du test YOLO (ci-dessus) : YOLO ne voit jamais le conducteur penché
+au convoyeur (0/15). Piste testée ici, isolée dans `signature_eval/` :
+l'identifier par la couleur dominante de ses vêtements plutôt que par sa
+silhouette (chaque employé porte ses propres vêtements, donc un signal
+potentiellement distinctif). **Aucun fichier de production ni de
+`yolo_eval/` n'a été modifié.**
+
+**Recherche d'une image "conducteur visible ailleurs"** : sur les 57
+images réelles, une seule contient une personne détectée (par YOLO) à
+l'intérieur d'une des 4 zones de la machine suivie, hors convoyeur :
+`159cdc7c-image.jpg.png` (11:40:51), zone `tete`, une personne en haut
+clair près de l'escalier. Toutes les autres détections YOLO du jeu de 57
+images sont soit un ouvrier récurrent à une **autre machine** (chemise
+bleue, coin haut-gauche, ~40/57 images — sert de témoin "autre
+personne"), soit un passant ou un ouvrier au bord du champ, sans rapport
+avec la machine suivie. **Limite importante** : cette unique image n'est
+pas confirmée comme étant le même conducteur (aucune vérité terrain) ; le
+jeu de données (57 captures DMSS sur ~20 minutes) ne permet pas de
+trouver mieux. Toute conclusion ci-dessous doit être lue comme un test de
+faisabilité, pas une validation statistique.
+
+**Méthode** (voir `signature_eval/signature.py`, choix documentés dans
+le code) :
+1. Masque de premier plan = pixels différents d'une image de référence
+   "machine vide" (`reference_fragments_real.png`, médiane des 57
+   images), même principe que la détection par fragments en production.
+2. Signature = couleur **médiane** des pixels du masque en espace **Lab**.
+3. Comparaison = distance sur la **chrominance seule (a, b)**, la
+   luminance L étant écartée (voir résultat ci-dessous).
+
+**Pourquoi écarter la luminance L** : mesurée d'abord avec la distance
+Lab complète, la couleur variait énormément d'une image convoyeur à
+l'autre (L de 61 à 160 sur les 15 images) à cause de l'éclairage, des
+reflets, et surtout du fait que **la pile de feuilles à côté du
+convoyeur bouge aussi** (elle est réapprovisionnée/consommée), contaminant
+le masque de différence au même titre que le corps du conducteur (c'est
+la même limite déjà documentée pour la détection de présence — dérive de
+palette, cf. section "Zone convoyeur ajoutée" plus haut). En ne comparant
+que la chrominance (a, b), le bruit de mesure chute fortement :
+
+| Comparaison | Distance moyenne (chrominance a,b) |
+|---|---|
+| Les 15 images convoyeur **entre elles** (même personne, même zone) | **1.7** (max 2.8) |
+| Les 15 images convoyeur vs témoin (ouvrier à la chemise bleue, autre machine) | **16.1** |
+| Les 15 images convoyeur vs signature "conducteur ailleurs" (159cdc7c) | **8.6** |
+
+**Lecture** : les 15 mesures au convoyeur sont très cohérentes entre
+elles (bruit ~1.7-2.8) — cohérent avec **le même vêtement filmé
+plusieurs fois**, malgré une visibilité très partielle (9 à 30 % de la
+zone visible selon l'image, le reste caché par la poutre/le poteau). Elles
+sont nettement plus proches de la signature "conducteur ailleurs" (8.6)
+que du témoin à chemise bleue (16.1) — un facteur ~2. Avec le seuil
+choisi (8.0, voir justification dans le code), 8 des 15 images
+correspondent ; les 7 autres sont juste au-dessus (9.2 à 11.2), cohérent
+avec un léger décalage de teinte dû à l'éclairage local du convoyeur
+(plus chaud que celui de la zone où la signature a été prise, 17 minutes
+plus tôt) plutôt qu'avec une personne différente.
+
+**Cas de confusion (autre ouvrier)** : le témoin (chemise bleue, autre
+machine) est nettement séparé (16.1, quasi 2x plus loin que la signature
+conducteur) — sur cet exemple, pas de risque de confusion visible entre
+les deux personnes.
+
+**Images annotées** : `signature_eval/resultats_2026-09-26/` —
+`signature_source.jpg` (référence), `temoin_autre_ouvrier.jpg` (témoin),
+`convoyeur_01.jpg`/`convoyeur_02.jpg` (deux cas convoyeur, masque en
+surimpression). Détail chiffré : `mesures.csv`, `resume.json`.
+
+**Conclusion : piste prometteuse mais non validée, à ne pas déployer en
+l'état.** Le signal (chrominance) sépare nettement les deux personnes
+observées ici, mais avec des limites sérieuses :
+- **Un seul exemple de signature de référence** — impossible de savoir si
+  la variabilité normale de la même personne (vêtements différents selon
+  les jours, éclairage) dépasse le seuil retenu.
+- **Portion visible très faible au convoyeur** (9-30 % de la zone,
+  souvent < 15 %) : fiable seulement si le masque tombe majoritairement
+  sur du tissu, pas sur la pile de feuilles ou le flou de la poutre — ce
+  qui arrive (contamination visible sur certaines images, notamment
+  `10d12a94` où une partie du masque touche la pile).
+- **La luminance ne peut pas servir** (trop instable), donc la méthode
+  perd toute information de "clair/foncé" et ne distinguerait pas deux
+  vêtements de même teinte mais de luminosité très différente (ex. bleu
+  clair vs bleu marine).
+
+**Recommandation** :
+1. Ne pas remplacer/compléter la détection par fragments avec cette
+   méthode pour l'instant — le jeu de preuves est trop mince (1 signature,
+   1 témoin).
+2. Si la piste est retenue, constituer un vrai jeu de données avant
+   d'aller plus loin : plusieurs captures du **même** conducteur, debout
+   et bien visible à différents endroits de la machine, le même jour que
+   des passages au convoyeur, pour valider un seuil de chrominance sur
+   plusieurs personnes réelles (pas un seul témoin).
+3. Méthode recommandée si ce jeu de données existe : couleur **médiane
+   en chrominance (a, b) de Lab**, masque par différence au fond de
+   référence, seuil à recalibrer sur les vraies données (celui utilisé
+   ici, 8.0, est une estimation prudente à mi-chemin entre le bruit
+   intra-personne mesuré, ~1.7-2.8, et l'écart inter-personnes mesuré,
+   ~16).
+4. Utiliser des images issues directement du flux RTSP (via
+   `debug_frames/`), pas des captures d'écran DMSS recompressées : la
+   compression/le redimensionnement des captures utilisées ici dégrade
+   la précision de couleur disponible.
+
 ## Contexte de cette session
 
 *(Section historique — voir « État actuel » ci-dessus pour la situation réelle.)*

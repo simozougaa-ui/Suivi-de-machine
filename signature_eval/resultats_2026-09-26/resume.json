@@ -1,0 +1,26 @@
+{
+  "signature_conducteur_Lab": [
+    107.0,
+    128.0,
+    124.0
+  ],
+  "signature_pixels": 2550,
+  "temoin_autre_ouvrier_Lab": [
+    133.0,
+    125.0,
+    117.0
+  ],
+  "n_images_convoyeur": 15,
+  "n_avec_pixels_visibles": 15,
+  "couleur_moyenne_convoyeur_Lab": [
+    93.6,
+    130.33333333333334,
+    132.2
+  ],
+  "distance_Lab_intra_convoyeur_moyenne": 34.04540457130609,
+  "distance_Lab_intra_convoyeur_max": 66.45984585530658,
+  "distance_ab_intra_convoyeur_moyenne": 1.6816493155237524,
+  "distance_ab_intra_convoyeur_max": 2.8197714643408927,
+  "distance_ab_moyenne_convoyeur_vs_signature": 8.571201442828578,
+  "distance_ab_moyenne_convoyeur_vs_temoin": 16.135932592873335
+}

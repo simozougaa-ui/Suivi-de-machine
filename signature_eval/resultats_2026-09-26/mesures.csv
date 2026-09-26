@@ -1,0 +1,16 @@
+image,pixels_masque,fraction_zone,Lab,distance_Lab_signature,distance_ab_signature,correspondance
+03d15c95-image.jpg.png,1687,0.187,"[70.0, 131.0, 131.0]",37.8,7.6,OUI
+10d12a94-image.jpg.png,2253,0.250,"[160.0, 130.0, 135.0]",54.2,11.2,non
+37e52e3d-image.jpg.png,1381,0.153,"[69.0, 130.0, 132.0]",38.9,8.2,non
+3d30c92c-image.jpg.png,1967,0.219,"[151.0, 130.0, 135.0]",45.4,11.2,non
+6660801e-image.jpg.png,2723,0.303,"[140.0, 130.0, 135.0]",34.8,11.2,non
+6b3f77d0-image.jpg.png,1130,0.126,"[121.0, 130.0, 133.0]",16.8,9.2,non
+6f9e7419-image.jpg.png,1169,0.130,"[151.0, 130.0, 134.0]",45.2,10.2,non
+7e0c4e59-image.jpg.png,1339,0.149,"[67.0, 131.0, 131.0]",40.7,7.6,OUI
+956becc0-image.jpg.png,2059,0.229,"[70.0, 130.0, 131.0]",37.7,7.3,OUI
+c2da5dd6-image.jpg.png,1734,0.193,"[77.0, 130.0, 131.0]",30.9,7.3,OUI
+ceccbcf2-image.jpg.png,847,0.094,"[64.0, 132.0, 132.0]",43.9,8.9,non
+d144f935-image.jpg.png,1581,0.176,"[62.0, 130.0, 130.0]",45.4,6.3,OUI
+e842730b-image.jpg.png,1538,0.171,"[71.0, 129.0, 131.0]",36.7,7.1,OUI
+ef396be3-image.jpg.png,945,0.105,"[70.0, 131.0, 131.0]",37.8,7.6,OUI
+f0d6eb2e-image.jpg.png,1193,0.133,"[61.0, 131.0, 131.0]",46.6,7.6,OUI

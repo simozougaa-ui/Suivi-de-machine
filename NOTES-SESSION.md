@@ -578,6 +578,74 @@ caméra 15 — en gardant à l'esprit qu'un enregistrement en mainstream est
 plus volumineux (plus d'espace disque utilisé, rétention réduite sur le
 DVR).
 
+### YOLO et signature sur flux DVR réel (mise à jour du 2026-09-26, non exécuté ici)
+
+Suite de la vérification précédente (mainstream réel confirmé : caméra 15,
+1280x720, H.264, 15 fps). Objectif : refaire les tests YOLO
+(`yolo_eval/`) et signature de couleur (`signature_eval/`) sur des images
+extraites **directement du flux DVR**, pour comparer avec les résultats
+obtenus sur les 57 captures d'écran DMSS (doublement compressées :
+compression DMSS + capture d'écran + redimensionnement manuel).
+
+**Bloqué depuis cet environnement** : toujours aucun accès réseau au
+DVR/Jetson (revérifié le 2026-09-26). Aucune nouvelle image n'a donc pu
+être extraite ni testée ici — ce qui suit est l'outillage préparé, à
+exécuter sur le Jetson, pas un résultat.
+
+**Choix de la plage horaire** : le 2026-09-05 11:48–12:00 (utilisé pour
+les 57 captures DMSS) date de **21 jours** avant aujourd'hui, contre une
+rétention DVR de **17 jours** confirmée précédemment — cet enregistrement
+est très probablement déjà écrasé. `dvr_check/list_recordings.sh` permet
+de le vérifier précisément (liste les fichiers d'enregistrement d'un jour
+donné via le CGI Dahua `mediaFileFind`), mais **la plage de repli
+2026-09-23 13:21–13:45** (3 jours, déjà utilisée par `yolo_eval/eval_yolo.py`,
+donc sûrement encore disponible) est recommandée par défaut plutôt que de
+perdre du temps à vérifier une plage presque certainement absente.
+
+**Outillage ajouté (isolé, aucun fichier de production/yolo_eval/
+signature_eval existant modifié)** :
+- `dvr_check/list_recordings.sh AAAA-MM-JJ` : liste les enregistrements
+  disponibles pour la caméra 15 un jour donné (lecture seule).
+- `signature_eval/extract_frames_dvr.py` : extrait des frames brutes
+  directement du flux mainstream RTSP (réutilise
+  `src.camera_stream.build_rtsp_playback_url`/`open_stream`, comme
+  `yolo_eval/eval_yolo.py`), une image par seconde par défaut, qualité
+  JPEG 95, **aucun redimensionnement manuel** (résolution native du flux
+  décodé, 1280x720 attendu) - contrairement aux captures DMSS utilisées
+  jusqu'ici.
+- `signature_eval/build_reference.py` : construit une image de référence
+  "machine vide" (médiane) à partir d'un dossier de frames, **vers un
+  fichier de sortie choisi** — volontairement distinct de
+  `compute_reference_fragments.py` (utilitaire de production existant, qui
+  écrit toujours dans `reference_fragments.png`, le fichier utilisé par
+  `src/fragment_detection.py` : le relancer aurait écrasé la référence de
+  production, ce qui est exclu ici).
+- `yolo_eval/eval_yolo.py` et `signature_eval/signature.py` sont réutilisés
+  **sans aucune modification** (déjà capables de lire directement le
+  flux DVR ou un dossier de frames).
+
+**Marche à suivre complète** (commandes exactes) : voir
+`yolo_eval/resultats_dvr_reel/README.md` et
+`signature_eval/resultats_dvr_reel/README.md` — ces deux dossiers sont
+créés vides (avec le mode d'emploi) en attendant l'exécution sur le
+Jetson ; les résultats déjà obtenus le 2026-09-26 sur les captures DMSS
+(`yolo_eval/resultats_2026-09-26/`, `signature_eval/resultats_2026-09-26/`)
+ne sont pas modifiés.
+
+**Limite anticipée pour l'étape 5 (signature de couleur)** : sur la plage
+2026-09-23 13:21–13:45, aucune image "conducteur visible ailleurs sur la
+machine" n'est connue à ce jour (le seul exemple utilisé jusqu'ici vient
+du jeu du 2026-09-05, DMSS). Il faudra probablement inspecter une plage
+plus large avant de retrouver un tel moment ; documenté comme limite
+ouverte dans `signature_eval/resultats_dvr_reel/README.md`.
+
+**Ce qui reste donc à faire (sur le Jetson, pas ici)** : lancer les
+commandes ci-dessus, puis comparer concrètement le taux de détection
+YOLO au convoyeur (0/15 sur DMSS) et le bruit de mesure de la signature
+de couleur (intra ~1,7 en a,b sur DMSS) à ce qu'on obtient sur des images
+non compressées manuellement — cette comparaison ne peut être faite
+qu'une fois ces commandes exécutées.
+
 ## Contexte de cette session
 
 *(Section historique — voir « État actuel » ci-dessus pour la situation réelle.)*

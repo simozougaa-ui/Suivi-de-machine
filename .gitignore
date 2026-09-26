@@ -31,3 +31,7 @@ yolo_eval/env.txt
 
 # Evaluation signature de couleur isolee (signature_eval/) : sorties de travail
 signature_eval/out/
+
+# Frames brutes extraites directement du DVR (signature_eval/extract_frames_dvr.py) :
+# volumineuses, regenerees a la demande depuis le DVR, jamais commitees.
+signature_eval/frames_dvr_*/

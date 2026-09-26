@@ -155,6 +155,12 @@ Le dossier `signature_eval/` teste si la couleur des vêtements peut aider
 `signature_eval/README.md` ; résultats et recommandation :
 `NOTES-SESSION.md`.
 
+## Vérifier le flux d'enregistrement du DVR (test, hors production)
+
+Le dossier `dvr_check/` vérifie (lecture seule) si le DVR enregistre la
+caméra 15 en mainstream (HD) ou substream (SD). Mode d'emploi :
+`dvr_check/README.md` ; résultat : `NOTES-SESSION.md`.
+
 ## Outils de débogage visuel (depuis le tableau de bord, port 8000)
 
 | Chemin | Contenu |

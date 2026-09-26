@@ -524,6 +524,60 @@ observées ici, mais avec des limites sérieuses :
    compression/le redimensionnement des captures utilisées ici dégrade
    la précision de couleur disponible.
 
+### Vérification du flux d'enregistrement DVR (mise à jour du 2026-09-26)
+
+Question posée : le DVR Dahua enregistre-t-il en continu la caméra 15 en
+**mainstream** (HD) ou **substream** (SD) ? C'est un réglage du planning
+d'enregistrement du DVR, indépendant du flux demandé en lecture. Vérification
+isolée dans `dvr_check/` (lecture seule, **aucun réglage du DVR modifié,
+aucun fichier de production/`yolo_eval/`/`signature_eval/` touché**).
+
+**Ce qui a pu être vérifié depuis l'environnement de développement**
+(DVR/Jetson injoignables, Tailscale hors de portée, confirmé à nouveau) :
+- Le code du projet (`src/camera_stream.py`) demande **toujours
+  `subtype=0`** (flux principal, convention Dahua : 0 = main, 1 = sub),
+  pour le direct comme pour la lecture des enregistrements
+  (`/cam/playback`). Ceci est inchangé depuis la création du projet.
+- **Mais ceci ne prouve rien sur ce que le DVR enregistre réellement** :
+  si le DVR est configuré pour n'enregistrer en continu que le substream,
+  demander `subtype=0` en lecture peut échouer, renvoyer un flux vide, ou
+  (selon le firmware) renvoyer quand même le seul flux disponible malgré
+  le paramètre demandé. Seule la configuration du DVR fait foi.
+- **Point important découvert en documentant ceci** : la valeur
+  « résolution du flux principal : 1280x720 » (section "État actuel"
+  ci-dessus) n'a jamais été mesurée directement sur un enregistrement RTSP
+  brut depuis ce projet — c'est une information transmise par Mohamed avant
+  réception du matériel. Les 57 images réelles utilisées pour les tests
+  YOLO et signature de couleur (`yolo_eval/`, `signature_eval/`) sont des
+  **captures d'écran de l'appli DMSS** (téléphone), recadrées puis
+  **redimensionnées manuellement à 1280x720** pour correspondre à cette
+  valeur supposée — ce n'est donc pas non plus une mesure fiable de la
+  résolution réelle du flux enregistré par le DVR. La seule image générée
+  à partir d'un vrai flux RTSP du Jetson (`reference_fragments.png`,
+  produite le 2026-09-23 par `compute_reference_fragments.py`) n'est pas
+  commitée dans le dépôt (fichier généré, non versionné) : sa résolution
+  n'a pas pu être revérifiée ici.
+
+**Donc : ni le réglage d'enregistrement du DVR, ni la résolution réelle
+des enregistrements déjà utilisés pour les tests, n'ont pu être confirmés
+depuis cet environnement.** Ce sujet reste ouvert tant que les commandes
+suivantes n'ont pas été lancées depuis le Jetson :
+
+```bash
+cd ~/suivi-de-machine && git pull
+bash dvr_check/check_stream_config.sh          # config DVR : resolution/bitrate main vs sub, planning
+python3 dvr_check/check_recording_resolution.py --image reference_fragments.png
+```
+
+Voir `dvr_check/README.md` pour le détail, le chemin dans l'interface web
+si le CGI de planning ne donne rien d'exploitable, et la marche à suivre
+**si un changement s'avère nécessaire (à ne faire qu'après validation
+explicite de Mohamed)** : Réglages → Stockage → Planning d'enregistrement,
+changer le flux programmé de Secondaire/Sub vers Principal/Main pour la
+caméra 15 — en gardant à l'esprit qu'un enregistrement en mainstream est
+plus volumineux (plus d'espace disque utilisé, rétention réduite sur le
+DVR).
+
 ## Contexte de cette session
 
 *(Section historique — voir « État actuel » ci-dessus pour la situation réelle.)*

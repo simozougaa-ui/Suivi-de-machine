@@ -35,3 +35,8 @@ signature_eval/out/
 # Frames brutes extraites directement du DVR (signature_eval/extract_frames_dvr.py) :
 # volumineuses, regenerees a la demande depuis le DVR, jamais commitees.
 signature_eval/frames_dvr_*/
+
+# Sortie brute de test_fragments_on_recording.py (deplacee par
+# signature_eval/prepare_day.sh vers resultats_multi_jours/<date>/ ;
+# ignoree ici en securite si un run est interrompu avant ce deplacement)
+/sessions_test_fragments.csv

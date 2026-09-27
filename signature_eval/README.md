@@ -6,9 +6,15 @@ conducteur penché au convoyeur, voir `yolo_eval/`) ? Ne modifie aucun
 fichier de production, ni `yolo_eval/`.
 
 Résultats et recommandation complets : `NOTES-SESSION.md`, section
-« Évaluation signature de couleur ». Résumé image par image :
+« Signature de couleur : conclusion ». Résumé image par image :
 `resultats_2026-09-26/mesures.csv` et `resume.json`. Images annotées :
 `resultats_2026-09-26/*.jpg`.
+
+**Validation multi-jours en cours** (2026-09-27) : voir
+`resultats_multi_jours/README.md` pour le protocole, les jours retenus et
+l'état d'avancement (`signature_eval/prepare_day.sh` prépare tout pour un
+jour donné, s'arrête avant `signature.py` en attente d'une vérification
+visuelle humaine des candidats).
 
 ## Méthode
 

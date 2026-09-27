@@ -881,6 +881,83 @@ complémentaire, pas un remplacement :
      agir dessus), pour comparer a posteriori aux observations humaines
      avant de lui donner un rôle actif dans le tableau de bord.
 
+### Validation multi-jours de la signature de couleur (mise à jour du 2026-09-27, en préparation)
+
+Suite à la conclusion du test à un seul jour (2026-09-23) : avant tout
+déploiement, vérifier la stabilité de la méthode sur plusieurs jours
+différents (éclairage variable, tenue du conducteur). **Bloqué comme
+toutes les étapes précédentes nécessitant le DVR** : cet environnement de
+développement n'a toujours pas d'accès réseau (revérifié). Rien n'a donc
+pu être extrait ni analysé ici — ce qui suit est l'outillage préparé,
+prêt à être lancé sur le Jetson, **et volontairement arrêté avant le
+lancement final de `signature.py`**, en attente d'une vérification
+visuelle humaine (demande explicite : cette vérification ne peut être
+faite que par Mohamed).
+
+**Jours proposés** (non vérifiés depuis ici, à confirmer avec
+`dvr_check/list_recordings.sh`) : **2026-09-15** (mardi, 12 jours),
+**2026-09-21** (lundi, 6 jours), **2026-09-25** (vendredi, 2 jours) — 3
+jours de semaine différents, étalés dans la fenêtre de rétention (~17
+jours, donc environ 2026-09-10 à 2026-09-27 aujourd'hui), en évitant le
+bord le plus incertain de la rétention (2026-09-10/11). Plage horaire
+proposée : **13:15:00, 30 minutes**, la même heure de journée que le test
+déjà validé du 23/09 (13:21-13:45), élargie un peu pour augmenter les
+chances de capturer plusieurs passages au convoyeur. Ces choix sont des
+hypothèses raisonnables, pas des certitudes : à vérifier/ajuster au
+premier lancement (si `test_fragments_on_recording.py` ne montre aucune
+présence sur cette plage un jour donné, essayer une autre heure avant de
+conclure à une indisponibilité).
+
+**Outillage ajouté (isolé, testé quand testable sans DVR, aucun script
+déjà validé modifié)** :
+
+- **`signature_eval/prepare_day.sh`** : orchestre, pour un jour donné,
+  les 5 étapes déjà utilisées manuellement pour le test du 23/09:
+  1. instants "convoyeur" via `test_fragments_on_recording.py` (script de
+     test existant, **réutilisé tel quel**, en lecture seule vis-à-vis de
+     la production - il ne fait que lire l'enregistrement et journaliser),
+     parsés par le nouveau `extract_convoyeur_instants.py` (repère les
+     lignes `convoyeur=...*`, testé avec un journal synthétique reproduisant
+     le format exact : extraction correcte, exclusion des `~` et lignes
+     absentes) ;
+  2. extraction des frames brutes (`extract_frames_dvr.py`, déjà existant) ;
+  3. détection YOLO (`yolo_eval/eval_yolo.py`, **non modifié**) ;
+  4. sélection automatique des candidats "conducteur ailleurs"
+     (`select_candidates.py`, déjà existant) ;
+  5. référence "machine vide" (`build_reference.py`, **non modifié**).
+  S'arrête ensuite en affichant clairement quelles images vérifier
+  visuellement, comment les voir depuis le téléphone (serveur http comme
+  pour les tests précédents), et la commande `signature.py` prête à
+  copier-coller **une fois la vérification faite** — jamais exécutée par
+  le script lui-même.
+- **`signature_eval/extract_convoyeur_instants.py`** (nouveau) : lit le
+  journal texte de `test_fragments_on_recording.py` et en extrait les
+  instants convoyeur, au format attendu par `signature.py
+  --occluded-list`.
+- `.gitignore` : ajout de `/sessions_test_fragments.csv` (sortie brute de
+  `test_fragments_on_recording.py`, déplacée automatiquement par
+  `prepare_day.sh` vers le dossier du jour).
+- `signature_eval/resultats_multi_jours/` créé avec le protocole complet,
+  les jours retenus et leur justification, et une liste de suivi à cocher
+  (disponibilité DVR / préparation / vérification visuelle / lancement
+  final, pour chacun des 3 jours) — sans toucher aux résultats existants
+  (`resultats_2026-09-26/`, `resultats_dvr_reel_v2/`).
+
+**Ce qui reste à faire, dans l'ordre, sur le Jetson** :
+1. `bash dvr_check/list_recordings.sh <date>` pour chacune des 3 dates
+   proposées (remplacer par le jour ouvré le plus proche si indisponible).
+2. `bash signature_eval/prepare_day.sh <date> 13:15:00 1800` pour chaque
+   jour retenu.
+3. **Vérification visuelle par Mohamed** de chaque candidat "conducteur
+   ailleurs" (`signature_eval/resultats_multi_jours/<date>/a_verifier/`),
+   retrait des lignes douteuses du manifeste.
+4. Lancer la commande `signature.py` affichée en fin de préparation, pour
+   chaque jour.
+5. Comparer les 3 résultats entre eux et avec le test du 23/09 (écart
+   signature/convoyeur, cohérences intra-groupe) pour conclure sur la
+   stabilité de la méthode d'un jour à l'autre — synthèse à documenter
+   ici une fois faite.
+
 ## Contexte de cette session
 
 *(Section historique — voir « État actuel » ci-dessus pour la situation réelle.)*

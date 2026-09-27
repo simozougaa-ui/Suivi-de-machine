@@ -475,6 +475,83 @@ convoyeur-spécifique est désormais disponible pour tout test futur (y
 compris sur les données multi-jours en préparation, voir
 "Validation multi-jours de la signature de couleur").
 
+### Diagnostic 0/57 zone convoyeur (mise à jour du 2026-09-27)
+
+Suite au 0/57 déjà observé pour `presence_convoyeur` : avant de conclure
+que YOLO échoue réellement, deux biais possibles du TEST lui-même ont
+été écartés méthodiquement (aucun fichier de production ni
+`signature_eval/signature.py` touché ; extension de
+`yolo_eval/eval_yolo.py` uniquement, décrite dans son en-tête).
+
+**Méthode** : nouveau mode `--diag-convoyeur` (voir docstring du
+script) — une seconde passe d'inférence à seuil quasi nul (`--diag-conf
+0.01`, contre 0,30 en usage normal) capture TOUTES les détections
+"person" candidates, pour chacune desquelles est calculé, en plus du
+test officiel centre-dans-zone (`in_zone`, inchangé) : l'IoU et la
+fraction de la boîte recouverte par la zone convoyeur (`overlap_metrics`,
+nouvelle fonction) — ce test ne dépend pas du centre, donc détecte aussi
+les boîtes qui débordent sans que leur centre soit dans la zone.
+`--verite-terrain` restreint l'analyse des scores aux images où la
+présence a été confirmée à l'œil (15 des 57 images, reprises de
+`occ.json`/la vérification manuelle déjà faite pour le test signature de
+couleur). `--marge-convoyeur-px` permet en plus de tester concrètement
+un agrandissement de la zone officielle.
+
+**Testé** sur les 57 vraies images caméra 15 (seules disponibles ici,
+toujours pas d'accès DVR/Jetson) :
+
+**Hypothèse 2 (seuil de confiance trop haut) : écartée.** Même à
+`--diag-conf 0.01` (quasi aucun filtrage), **aucune détection n'a son
+centre dans la zone convoyeur**, sur les 57 images ET sur les 15 images
+confirmées manuellement. Le modèle n'échoue pas parce que ses
+détections sont filtrées : il ne produit tout simplement **aucune
+boîte candidate** dans cette zone, à aucune confiance. Confirmé
+visuellement : `yolo_eval/resultats_2026-09-26/diagnostic_convoyeur_conf001.jpg`
+(13:20:01, présence confirmée au convoyeur — 14 boîtes candidates à
+conf≥0,01 ailleurs dans l'image, aucune ne touche la zone convoyeur,
+même en bord de cadre).
+
+**Hypothèse 3 (boîte déborde sans que le centre y soit) : écartée.**
+Sur 990 détections candidates générées (toutes images, conf≥0,01), 2
+seulement ont un chevauchement non nul avec la zone convoyeur sans que
+leur centre y soit — et leur recouvrement est négligeable (IoU 0,006 à
+0,009, 2 à 3 % de la boîte). Aucune de ces 2 détections marginales n'est
+sur une image de vérité-terrain (conducteur confirmé) : ce sont des
+boîtes ailleurs dans l'image qui touchent à peine le rectangle par
+coïncidence, pas des indices d'un conducteur mal cadré.
+
+**Ajustement testé concrètement (conf=0,01 + marge zone +30px, le
+maximum de permissivité raisonnable)** : le taux passe de 0/57 à
+**1/57** — mais ce gain est un **faux positif**, pas une vraie
+détection retrouvée : la seule image concernée (13:20:11) n'est PAS
+dans les 15 confirmées au convoyeur ; c'est le cas déjà connu et
+documenté d'une personne détectée dans la zone "tête" (voir "Évaluation
+YOLO isolée" plus haut), dont une boîte fragmentaire à très faible
+confiance (0,03) déborde dans la zone convoyeur élargie par la marge.
+Élargir la zone ou baisser le seuil n'a donc pas récupéré le conducteur
+manqué ; ça a introduit un risque de faux positif sur une détection déjà
+correctement classée ailleurs.
+
+**Conclusion (point 5 de la demande) : le 0/57 est un vrai échec du
+modèle, pas un artefact du test.** Confirmé avec des exemples précis
+(image ci-dessus) : sur les 15 images où le conducteur est physiquement
+visible au convoyeur (bien que penché, immobile, ou partiellement masqué
+par le poteau/la pile de cartons), YOLO11n ne produit littéralement
+aucune boîte candidate à cet endroit, à aucun niveau de confiance, dans
+aucun rayon raisonnable autour de la zone. Ceci confirme et renforce
+(avec des données, pas seulement une observation qualitative) la
+conclusion déjà tirée le 2026-09-26 et le 2026-09-27 : YOLO générique
+est structurellement inadapté à cette pose/cet angle spécifiques, pas
+seulement mal réglé - cohérent avec la recommandation déjà documentée
+d'utiliser le système par pixels + signature de couleur (ou un futur
+modèle réentraîné sur des images de cette caméra) plutôt que d'espérer
+gagner en ajustant les seuils de YOLO.
+
+Nouveaux paramètres `eval_yolo.py` (rétrocompatibles, défauts =
+comportement identique aux runs précédents) : `--diag-convoyeur`,
+`--diag-conf` (0.01), `--verite-terrain`, `--marge-convoyeur-px` (0). Le
+comportement par défaut (sans ces options) est strictement inchangé.
+
 ### Évaluation d'une signature de couleur vestimentaire (mise à jour du 2026-09-26)
 
 Suite du test YOLO (ci-dessus) : YOLO ne voit jamais le conducteur penché

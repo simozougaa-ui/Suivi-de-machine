@@ -33,6 +33,16 @@ convoyeur ; jaune = personne ailleurs.
 Autre plage (avec passants) : changer `--debut`/`--duree`. Sans DVR :
 `--depuis-dossier debug_frames/<dossier>`.
 
+## Diagnostic "0 détection zone convoyeur" (2026-09-27)
+
+`--diag-convoyeur` investigue si un 0/N sur la zone convoyeur vient d'un
+vrai échec du modèle ou d'un biais du test (seuil de confiance trop
+haut, ou boîte détectée débordant la zone sans que son centre y soit).
+Voir la docstring de `eval_yolo.py` et `NOTES-SESSION.md`, section
+« Diagnostic 0/57 zone convoyeur », pour la méthode et la conclusion
+(les deux hypothèses ont été écartées par les données : c'est un vrai
+échec du modèle sur cette pose/cet angle).
+
 ## Voir les images depuis le téléphone
 
 ```bash

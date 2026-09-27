@@ -83,6 +83,18 @@ DIFF_THRESHOLD = 18
 # image de signature de référence, pas un jeu de données validé.
 MATCH_THRESHOLD_AB = 8.0
 
+# Fraction minimum de pixels changés dans la zone convoyeur (frac) pour
+# considérer qu'il y a assez de matière (vêtement/corps) pour comparer sa
+# couleur à la signature - sinon, du bruit (variation d'éclairage,
+# reflet, léger mouvement de la machine) peut suffire à déclencher un
+# faux "OUI" alors que personne n'est présent. Calibré sur les mesures de
+# cette évaluation : bruit de fond mesuré à 18-27% sur des images
+# vérifiées visuellement comme vides, présence réelle du conducteur
+# mesurée à 30-38% sur les images confirmées - 0.28 sépare les deux
+# plages avec une marge. À recalibrer si de nouvelles mesures montrent
+# que ces deux plages se chevauchent.
+MIN_FRAC_PRESENCE = 0.28
+
 
 def foreground_mask(frame, reference, box):
     x1, y1, x2, y2 = box
@@ -250,14 +262,29 @@ def main():
         frac = n_px / zone_area
         color = median_color_lab(frame, ZONE_CONVOYEUR, mask)
         if color is None:
-            rows.append([name, n_px, f"{frac:.2f}", "", "", "aucun pixel"])
+            rows.append([name, n_px, f"{frac:.2f}", "", "", "", "non", "aucun pixel"])
             continue
+
+        frac_suffisante = frac >= MIN_FRAC_PRESENCE
+        if not frac_suffisante:
+            # Pas assez de matière changée pour que la couleur mesurée soit
+            # fiable (bruit probable, pas une vraie présence) : on ne calcule
+            # même pas la distance à la signature, on force "non", et on
+            # n'ajoute pas cette couleur aux statistiques de cohérence
+            # (elle fausserait la moyenne/l'intra-convoyeur avec du bruit).
+            match = "non"
+            rows.append([name, n_px, f"{frac:.3f}", np.round(color, 1).tolist(),
+                         "", "", "non", match])
+            print(f"[convoyeur] {name}: pixels={n_px} ({frac:.0%} de la zone, "
+                  f"< {MIN_FRAC_PRESENCE:.0%} requis) -> {match} (frac insuffisante)", flush=True)
+            continue
+
         d_sig_lab = lab_distance(color, sig_color)
         d_sig_ab = ab_distance(color, sig_color)
         match = "OUI" if d_sig_ab < MATCH_THRESHOLD_AB else "non"
         colors.append(color)
         rows.append([name, n_px, f"{frac:.3f}", np.round(color, 1).tolist(),
-                     f"{d_sig_lab:.1f}", f"{d_sig_ab:.1f}", match])
+                     f"{d_sig_lab:.1f}", f"{d_sig_ab:.1f}", "oui", match])
         print(f"[convoyeur] {name}: pixels={n_px} ({frac:.0%} de la zone) "
               f"Lab={np.round(color, 1)} distance_Lab={d_sig_lab:.1f} "
               f"distance_ab={d_sig_ab:.1f} -> {match}", flush=True)
@@ -274,7 +301,8 @@ def main():
     with open(os.path.join(args.out_dir, "mesures.csv"), "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["image", "pixels_masque", "fraction_zone", "Lab",
-                    "distance_Lab_signature", "distance_ab_signature", "correspondance"])
+                    "distance_Lab_signature", "distance_ab_signature",
+                    "frac_suffisante", "correspondance"])
         w.writerows(rows)
 
     # --- Résumé : cohérence interne des 15 mesures (sans dépendre de la

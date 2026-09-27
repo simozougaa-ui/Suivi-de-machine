@@ -958,6 +958,50 @@ déjà validé modifié)** :
    stabilité de la méthode d'un jour à l'autre — synthèse à documenter
    ici une fois faite.
 
+### Correctif `signature_eval/signature.py` : seuil minimum de fraction avant comparaison de couleur (mise à jour du 2026-09-27)
+
+**Bug identifié** : le script calculait `frac` (fraction de pixels
+changés dans la zone convoyeur par rapport à la référence "machine
+vide") mais ne l'utilisait jamais comme garde-fou avant de comparer la
+couleur médiane à la signature du conducteur. Du bruit (variation
+d'éclairage, reflet, léger mouvement de la machine) pouvait donc suffire
+à déclencher un faux "OUI" même sans personne présente dans la zone : la
+comparaison de couleur se faisait sur n'importe quelle fraction de pixels
+changés, même minime et non représentative d'un vêtement.
+
+**Correctif** : nouvelle constante `MIN_FRAC_PRESENCE = 0.28`, à côté de
+`DIFF_THRESHOLD` et `MATCH_THRESHOLD_AB`. Avant de calculer les distances
+et le résultat de correspondance, si `frac < MIN_FRAC_PRESENCE` : `match`
+est forcé à `"non"`, la couleur n'est PAS ajoutée à la liste `colors`
+(pour ne pas fausser les statistiques de cohérence intra-convoyeur et la
+moyenne convoyeur/signature avec du bruit), et les distances ne sont même
+pas calculées (pas de sens à comparer une couleur mesurée sur du bruit).
+Valeur de départ (0,28) basée sur les mesures rapportées : bruit de fond
+18-27% sur des images vérifiées vides, présence réelle 30-38% sur des
+images confirmées - à recalibrer si de nouvelles mesures montrent un
+chevauchement.
+
+**CSV (`mesures.csv`) et logs** : nouvelle colonne `frac_suffisante`
+(oui/non), pour distinguer en un coup d'œil une image rejetée pour
+fraction insuffisante (`frac_suffisante=non`, `correspondance=non`) d'une
+image avec assez de matière mais dont la couleur ne correspond pas
+(`frac_suffisante=oui`, `correspondance=non`). Le cas "aucun pixel de
+masque" (`color is None`) est inchangé (toujours `"aucun pixel"` dans la
+colonne correspondance), une colonne `frac_suffisante=non` lui est
+simplement ajoutée pour garder un CSV à nombre de colonnes constant.
+
+**Vérifié** sur les 57 images DMSS (seules disponibles ici) : plus aucune
+exception, CSV cohérent. Avec ce seuil (calibré sur les mesures DVR
+natives, plus fiables), seule 1 des 15 anciennes images convoyeur DMSS
+dépasse encore 28% (30,3%) - cohérent avec le fait que les captures DMSS,
+plus bruitées/compressées, montraient déjà une fraction de pixels
+changés généralement plus faible que les images DVR natives (voir
+NOTES-SESSION.md, comparaison DMSS vs DVR réel) ; ce n'est pas un signe
+de bug, mais la conséquence attendue d'un seuil calibré sur de meilleures
+images appliqué à des images de moins bonne qualité.
+
+Aucun autre fichier modifié (ni production, ni yolo_eval/).
+
 ## Contexte de cette session
 
 *(Section historique — voir « État actuel » ci-dessus pour la situation réelle.)*

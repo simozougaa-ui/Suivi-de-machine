@@ -552,6 +552,105 @@ comportement identique aux runs précédents) : `--diag-convoyeur`,
 `--diag-conf` (0.01), `--verite-terrain`, `--marge-convoyeur-px` (0). Le
 comportement par défaut (sans ces options) est strictement inchangé.
 
+### Test YOLO-pose (préparation) (2026-09-27)
+
+Suite du diagnostic 0/57 zone convoyeur (section ci-dessus) : YOLO11n
+classique ne produit AUCUNE boîte candidate dans la zone convoyeur, à
+aucune confiance. Hypothèse testée ici : un modèle **pose** (17
+points-clés COCO, chacun avec sa propre confiance) pourrait être plus
+tolérant à l'occlusion partielle du conducteur (penché, coupé par la
+poutre/le poteau/la pile) qu'une détection de silhouette entière.
+
+**Contrainte de données (rappel)** : aucun accès réseau au DVR/Jetson
+depuis cet environnement. Les 1440 frames DVR natives
+(`signature_eval/resultats_dvr_reel/frames_extraites/`) sont gitignorées
+et n'existent que sur le Jetson — non cherchées ni utilisées ici. **Tout
+ce qui suit dans cette section a été écrit et testé sur des captures
+DMSS dégradées disponibles localement, uniquement pour vérifier que le
+script tourne sans erreur. Aucun chiffre ci-dessous n'est un résultat sur
+les vraies frames DVR** — le résultat réel reste à obtenir par Mohamed
+sur le Jetson (commandes exactes : `yolo_eval/README.md`, section « Test
+YOLO-pose »).
+
+**Outillage ajouté, dans `yolo_eval/` uniquement** (`eval_yolo.py`,
+`signature_eval/signature.py` et tout fichier de production **non
+modifiés** — vérifié par `git diff`) :
+
+- **`yolo_eval/eval_pose.py`** : modèle `yolo11n-pose.pt` (Ultralytics),
+  imgsz 1280. Importe (sans les modifier) `frames_from_folder`, `in_zone`,
+  `expand_zone`, `ZONE_CONVOYEUR`, `ZONE_MACHINE` d'`eval_yolo.py` (module
+  frère, comme demandé : « en appelant la logique existante... sans la
+  modifier »).
+  - **Aucun filtrage à l'inférence** (`--diag-conf 0.01`, quasi nul) —
+    leçon directe du diagnostic précédent : ne jamais filtrer avant
+    d'avoir regardé les scores bruts. Toutes les détections et leurs 17
+    points-clés (position + confiance individuelle) sont loggés bruts
+    dans `keypoints_bruts.csv`, avec un indicateur "dans la zone
+    convoyeur" précalculé pour 3 marges (0/15/30 px) — permet de refaire
+    n'importe quel calcul de seuil sans réinférer.
+  - `detections_pose.csv` (une ligne par image) calcule une grille
+    complète **4 critères × 4 seuils de confiance (0.05/0.1/0.2/0.3) × 3
+    marges de zone (0/15/30 px) = 48 colonnes oui/non** : `tete` (nez/
+    yeux/oreilles), `epaule` (gauche ou droite), `corps` (tête + épaules
+    + coudes + poignets), `boite` (centre de la boîte, comme YOLO
+    classique - témoin de comparaison directe).
+  - Comparaison avec YOLO classique sur les instants de vérité terrain :
+    réutilise un `detections.csv` déjà produit par `eval_yolo.py`
+    (`--classique-csv`) si disponible (cas attendu : Mohamed aura déjà
+    lancé `eval_yolo.py` sur `frames_extraites/`), sinon relance sa
+    propre inférence `yolo11n.pt` sur les seuls instants demandés (import
+    de `in_zone`/`ZONE_CONVOYEUR`, logique inchangée). Produit
+    `comparaison_pose_vs_classique.csv` (détail par instant) et un
+    résumé texte (taux de détection sur les instants confirmés
+    PRÉSENTS, taux de faux positifs sur les instants confirmés ABSENTS,
+    pour les 48 variantes + le témoin classique).
+  - Images annotées (`pose_present_HHMMSS.jpg`/`pose_absent_HHMMSS.jpg`)
+    pour chaque instant de vérité terrain : boîtes, points-clés colorés
+    rouge (confiance faible) à vert (confiance forte), zone convoyeur en
+    magenta — pour vérifier à l'œil ce que le modèle produit, y compris
+    les points-clés à très faible confiance.
+- **`yolo_eval/select_absent_instants.py`** : sélectionne automatiquement
+  des instants confirmés ABSENTS au convoyeur (vérité terrain négative,
+  pour les faux positifs), à partir du journal de
+  `test_fragments_on_recording.py` (script de production existant,
+  réutilisé tel quel, en lecture seule) — lignes `absent ...
+  convoyeur=0.00` (aucun mouvement du tout, signal le plus net qu'il n'y
+  a personne), réparties dans le temps. Miroir de
+  `signature_eval/extract_convoyeur_instants.py` (instants PRÉSENTS,
+  inchangé, réutilisé tel quel) mais pour la classe négative ; vit dans
+  `yolo_eval/` (pas de modification de `signature_eval/`).
+
+**Vérité terrain utilisée pour CE test local** (pas la vraie vérité
+terrain DVR, qui reste à construire sur le Jetson via les commandes
+ci-dessus) : les 57 captures DMSS déjà utilisées pour tous les tests
+précédents (YOLO classique, signature de couleur) ; 15 images
+"présentes" = celles d'`occ.json` (conducteur confirmé au convoyeur,
+vérifié à l'œil dans une session précédente) ; 10 images "absentes" =
+choisies parmi les 41 autres, hors du seul cas ambigu déjà connu (la
+détection "tête", voir "Évaluation YOLO isolée"), sur la base de la
+revue visuelle déjà faite de l'intégralité des 57 images dans ce projet.
+
+**Résultat du test de bon fonctionnement (DMSS, PAS un résultat DVR)** :
+aucune exception, CSV cohérents (`keypoints_bruts.csv` : 8008 lignes pour
+57 images à détections variables × 17 points-clés ; `detections_pose.csv` :
+58 lignes = 57 + en-tête ; `comparaison_pose_vs_classique.csv` : 26 lignes
+= 15 présents + 10 absents + en-tête), 25 images annotées produites
+(15 + 10), rendu visuel vérifié
+(`yolo_eval/resultats_2026-09-26/pose_test_local_conf001.jpg`). Sur CES
+images dégradées, toutes les variantes pose donnent des taux très
+faibles et proches du bruit (ex. `tete_m0_t0.1` : 13 % de détection sur
+les présents, 10 % de faux positifs sur les absents — pas de signal net,
+mais ces images sont bien plus dégradées que les vraies frames DVR
+visées par l'hypothèse, donc **ceci ne réfute ni ne confirme
+l'hypothèse pose** ; c'est attendu et sans valeur de conclusion,
+seulement une preuve que le mécanisme fonctionne.
+
+**À faire sur le Jetson pour obtenir le vrai résultat** : voir
+`yolo_eval/README.md`, section « Test YOLO-pose (préparation) », pour les
+commandes exactes (téléchargement du poids, construction de la vérité
+terrain, lancement, consultation depuis le téléphone, estimation de durée
+et avertissement de charge CPU partagée avec `suivi-presence`).
+
 ### Évaluation d'une signature de couleur vestimentaire (mise à jour du 2026-09-26)
 
 Suite du test YOLO (ci-dessus) : YOLO ne voit jamais le conducteur penché

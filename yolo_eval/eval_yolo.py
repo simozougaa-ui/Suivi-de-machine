@@ -6,13 +6,20 @@ dossier d'images debug_frames/, et écrit ses résultats dans yolo_eval/out/.
 
 Pour chaque image analysée (une toutes les --pas secondes) : détection des
 personnes, classement de chaque boîte "machine" (dans la zone de la machine
-suivie) ou "ailleurs" (autres ouvriers, passants), mesure du temps
-d'inférence. Produit :
-- out/<date>_<HHMMSS>/detections.csv : une ligne par image analysée
+suivie) ou "ailleurs" (autres ouvriers, passants), et en plus (mise à jour
+du 2026-09-27) classement spécifique "zone convoyeur" (même rectangle que
+signature_eval/signature.py, ZONE_CONVOYEUR — dupliqué ici en dur, comme
+partout ailleurs dans ce dossier, pour ne dépendre d'aucun autre fichier),
+mesure du temps d'inférence. Produit :
+- out/<date>_<HHMMSS>/detections.csv : une ligne par image analysée, avec
+  nb_zone_convoyeur et presence_convoyeur (oui/non) en plus des colonnes
+  existantes (nb_zone_machine reste l'union des 4 zones, inchangée)
 - out/<date>_<HHMMSS>/resume.txt : modèle, appareil, FPS, taux de détection
+  (dont un taux spécifique zone convoyeur)
 - out/<date>_<HHMMSS>/img_<HHMMSS>.jpg : images annotées (moments clés,
   premières détections sur la machine, et une image de contrôle toutes les
-  --controle secondes)
+  --controle secondes) ; la zone convoyeur est dessinée en plus de la zone
+  machine, en magenta
 
 Usage (depuis la racine du dépôt, avec le venv isolé) :
     yolo_eval/.venv/bin/python yolo_eval/eval_yolo.py --date 2026-09-23 --debut 13:21:00 --duree 1440
@@ -41,6 +48,14 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # dépendre d'aucun fichier de production. Une personne détectée dedans est
 # candidate "conducteur" ; ailleurs, c'est un autre ouvrier ou un passant.
 ZONE_MACHINE = (520, 60, 830, 400)
+
+# Zone convoyeur : identique à signature_eval/signature.py (ZONE_CONVOYEUR)
+# et à src/fragment_detection.py, dupliquée ici en dur pour la même raison
+# (aucune dépendance croisée entre dossiers d'évaluation isolés). C'est la
+# zone où le système par pixels (signature_eval/signature.py) et
+# l'inspection visuelle ratent parfois le conducteur (immobile, ou masqué
+# par le poteau/la pile de cartons) : YOLO est testé spécifiquement dessus.
+ZONE_CONVOYEUR = (700, 150, 790, 250)
 
 ASSUMED_FPS = 15.0
 PERSON_CLASS = 0
@@ -106,12 +121,16 @@ def annotate(frame, boxes, timestamp):
     out = frame.copy()
     zx1, zy1, zx2, zy2 = ZONE_MACHINE
     cv2.rectangle(out, (zx1, zy1), (zx2, zy2), (255, 255, 0), 1)
-    for (x1, y1, x2, y2), conf, machine in boxes:
-        color = (0, 0, 255) if machine else (0, 220, 255)
+    cx1, cy1, cx2, cy2 = ZONE_CONVOYEUR
+    cv2.rectangle(out, (cx1, cy1), (cx2, cy2), (255, 0, 255), 1)
+    for (x1, y1, x2, y2), conf, machine, convoyeur in boxes:
+        color = (255, 0, 255) if convoyeur else ((0, 0, 255) if machine else (0, 220, 255))
         cv2.rectangle(out, (int(x1), int(y1)), (int(x2), int(y2)), color, 2)
         cv2.putText(out, f"{conf:.2f}", (int(x1), max(12, int(y1) - 4)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
     n_machine = sum(1 for b in boxes if b[2])
-    label = f"{timestamp:%H:%M:%S}  personnes: {len(boxes)}  dont zone machine: {n_machine}"
+    n_convoyeur = sum(1 for b in boxes if b[3])
+    label = (f"{timestamp:%H:%M:%S}  personnes: {len(boxes)}  dont zone machine: {n_machine}"
+             f"  dont convoyeur: {n_convoyeur}")
     cv2.rectangle(out, (0, 0), (out.shape[1], 30), (0, 0, 0), -1)
     cv2.putText(out, label, (8, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
     return out
@@ -170,13 +189,16 @@ def main():
         boxes = []
         for b in res.boxes:
             xyxy = [float(v) for v in b.xyxy[0].tolist()]
-            boxes.append((xyxy, float(b.conf[0]), in_zone(xyxy)))
+            boxes.append((xyxy, float(b.conf[0]), in_zone(xyxy, ZONE_MACHINE), in_zone(xyxy, ZONE_CONVOYEUR)))
         n_machine = sum(1 for b in boxes if b[2])
-        rows.append([f"{timestamp:%H:%M:%S}", len(boxes), n_machine,
+        n_convoyeur = sum(1 for b in boxes if b[3])
+        presence_convoyeur = "oui" if n_convoyeur else "non"
+        rows.append([f"{timestamp:%H:%M:%S}", len(boxes), n_machine, n_convoyeur, presence_convoyeur,
                      max((b[1] for b in boxes), default=0.0),
                      " ".join(f"{int(x1)},{int(y1)},{int(x2)},{int(y2)}:{c:.2f}{'M' if m else ''}"
-                              for (x1, y1, x2, y2), c, m in boxes)])
+                              for (x1, y1, x2, y2), c, m, _ in boxes)])
         print(f"[{timestamp:%H:%M:%S}] personnes={len(boxes)} zone_machine={n_machine} "
+              f"zone_convoyeur={n_convoyeur} presence_convoyeur={presence_convoyeur} "
               f"({infer_times[-1] * 1000:.0f} ms)", flush=True)
 
         hhmmss = f"{timestamp:%H:%M:%S}"
@@ -198,7 +220,8 @@ def main():
 
     with open(os.path.join(out_dir, "detections.csv"), "w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["heure", "nb_personnes", "nb_zone_machine", "conf_max", "boites(x1,y1,x2,y2:conf, M=zone machine)"])
+        w.writerow(["heure", "nb_personnes", "nb_zone_machine", "nb_zone_convoyeur", "presence_convoyeur",
+                    "conf_max", "boites(x1,y1,x2,y2:conf, M=zone machine)"])
         w.writerows(rows)
 
     mean_ms = 1000 * sum(infer_times) / len(infer_times)
@@ -213,6 +236,8 @@ def main():
         f"images avec >=1 personne              : {sum(1 for r in rows if r[1])}/{n}",
         f"images avec >=1 personne zone machine : {sum(1 for r in rows if r[2])}/{n}",
         f"images avec personne hors zone machine: {sum(1 for r in rows if r[1] > r[2])}/{n}",
+        f"images avec presence_convoyeur=oui    : {sum(1 for r in rows if r[4] == 'oui')}/{n}"
+        f" (taux = {sum(1 for r in rows if r[4] == 'oui') / n:.1%})",
         f"moments cles     : " + ", ".join(
             f"{m}={'OUI' if any(r[0] == m and r[2] for r in rows) else 'non'}" for m in sorted(moments)),
     ]

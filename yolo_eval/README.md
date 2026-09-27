@@ -20,11 +20,15 @@ yolo_eval/.venv/bin/python yolo_eval/eval_yolo.py --date 2026-09-23 --debut 13:2
 
 `eval_yolo.py` lit l'enregistrement du DVR (1 image/s), détecte les
 personnes et écrit dans `yolo_eval/out/<date>_<HHMMSS>/` :
-`resume.txt` (FPS, taux de détection, moments clés), `detections.csv`
-(une ligne par seconde) et des images annotées `img_HHMMSS.jpg`
-(13:21:07/10/13/16, premières détections dans la zone machine, une image
-de contrôle toutes les 30 s). Cadre cyan = zone machine ; boîte rouge =
-personne dans la zone machine ; jaune = personne ailleurs.
+`resume.txt` (FPS, taux de détection, moments clés, taux de présence
+zone convoyeur), `detections.csv` (une ligne par seconde, avec
+`nb_zone_convoyeur`/`presence_convoyeur` en plus de `nb_zone_machine` —
+voir NOTES-SESSION.md, « Zone convoyeur ajoutée à l'évaluation YOLO ») et
+des images annotées `img_HHMMSS.jpg` (13:21:07/10/13/16, premières
+détections dans la zone machine, une image de contrôle toutes les 30 s).
+Cadre cyan = zone machine ; cadre magenta = zone convoyeur ; boîte rouge
+= personne dans la zone machine ; magenta = personne dans la zone
+convoyeur ; jaune = personne ailleurs.
 
 Autre plage (avec passants) : changer `--debut`/`--duree`. Sans DVR :
 `--depuis-dossier debug_frames/<dossier>`.

@@ -418,6 +418,63 @@ yolo_eval/.venv/bin/python yolo_eval/eval_yolo.py --date 2026-09-23 --debut 13:2
 python3 -m http.server 8001 --directory yolo_eval/out   # puis http://100.116.160.30:8001/
 ```
 
+### Zone convoyeur ajoutée à l'évaluation YOLO (mise à jour du 2026-09-27)
+
+Nouvelle demande reçue pour "mettre en place et tester YOLO sur le
+Jetson" : ce travail **existe déjà en très grande partie** depuis le
+2026-09-26 (section ci-dessus, `yolo_eval/`) — modèle choisi (YOLO11n),
+script isolé (`eval_yolo.py`), mesures de FPS/qualité, rapport complet.
+Pas de nouveau dossier créé (la demande en suggérait un, `yolo_eval/`,
+déjà pris) ; le point réellement manquant a été ajouté à l'existant :
+**une classification spécifique "zone convoyeur"** (distincte de
+`zone_machine`, qui est l'union des 4 zones) et un log explicite
+présence oui/non sur cette zone précise — c'est celle où le système par
+pixels (`signature_eval/signature.py`) et l'inspection visuelle ratent le
+plus souvent le conducteur (immobile, masqué par le poteau/la pile).
+
+**Changements dans `yolo_eval/eval_yolo.py`** (additifs, rétrocompatibles) :
+- `ZONE_CONVOYEUR = (700, 150, 790, 250)` — même rectangle que
+  `signature_eval/signature.py` (dupliqué en dur, comme partout ailleurs
+  dans ce dossier, pour ne dépendre d'aucun autre fichier).
+- Chaque boîte détectée est maintenant classée sur DEUX zones
+  indépendantes (`in_zone(xyxy, ZONE_MACHINE)` et
+  `in_zone(xyxy, ZONE_CONVOYEUR)`, la fonction `in_zone` acceptait déjà un
+  paramètre `zone`, réutilisée telle quelle).
+- `detections.csv` : deux colonnes ajoutées, `nb_zone_convoyeur` et
+  `presence_convoyeur` (oui/non) — insérées après `nb_zone_machine`,
+  colonnes existantes intactes (même noms, même contenu) : aucun script
+  qui lit ce CSV par nom de colonne (`select_candidates.py`) n'est
+  affecté (vérifié en relisant son code).
+- `resume.txt` : nouvelle ligne "images avec presence_convoyeur=oui" avec
+  le taux correspondant.
+- Images annotées : la zone convoyeur est maintenant dessinée en magenta
+  (en plus du cadre cyan de la zone machine), et l'étiquette affiche
+  aussi le nombre de détections "dont convoyeur". Exemple :
+  `yolo_eval/resultats_2026-09-26/zone_convoyeur_ajoutee.jpg`.
+
+**Testé** (57 vraies images caméra 15, seules disponibles ici - toujours
+aucun accès réseau au DVR/Jetson depuis cet environnement, revérifié) :
+aucune exception, CSV cohérent, rendu visuel correct (capture ci-dessus).
+Résultat : **0/57 `presence_convoyeur=oui`** — confirme une fois de plus,
+avec le nouveau mécanisme de log explicite cette fois, ce qui était déjà
+documenté (0/15 sur le même principe le 2026-09-26) : YOLO générique ne
+voit jamais le conducteur dans cette zone précise. 1/57 `zone_machine`
+(le même cas connu, zone "tête", hors convoyeur).
+
+**Comparaison qualitative demandée (YOLO vs `signature_eval/signature.py`)** :
+| Limite | Système par pixels (signature.py) | YOLO |
+|---|---|---|
+| Bruit de mouvement / éclairage (faux positif) | Oui, avant le correctif `MIN_FRAC_PRESENCE` de la veille (voir section dédiée) - une variation de pixels seule pouvait déclencher un "OUI" | Non concerné par ce type de bruit (détecte une silhouette, pas un changement de pixels) mais rate presque toujours le conducteur assis/masqué (0/57 ici) |
+| Pose statique (conducteur immobile) | Peut manquer une présence si le mouvement est trop faible pour dépasser le seuil de différence | Ne dépend pas du mouvement, seulement de la silhouette - mais la pose penchée/statique typique au convoyeur reste rarement reconnaissable par un YOLO générique |
+| Occlusion partielle (poteau, pile de cartons) | Le seuil de fraction de pixels vus (`MIN_FRAC_PRESENCE`, 0,28) compense en partie en exigeant une portion minimum visible | YOLO échoue presque systématiquement dès que la silhouette humaine standard est coupée (déjà documenté : 0/15 puis 0/57 au convoyeur) |
+
+**Conclusion inchangée par rapport au 2026-09-26** : YOLO reste peu utile
+seul pour la zone convoyeur spécifiquement (voir recommandation complète
+dans "Signature de couleur : conclusion") ; le nouveau mécanisme de log
+convoyeur-spécifique est désormais disponible pour tout test futur (y
+compris sur les données multi-jours en préparation, voir
+"Validation multi-jours de la signature de couleur").
+
 ### Évaluation d'une signature de couleur vestimentaire (mise à jour du 2026-09-26)
 
 Suite du test YOLO (ci-dessus) : YOLO ne voit jamais le conducteur penché

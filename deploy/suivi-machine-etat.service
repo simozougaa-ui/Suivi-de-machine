@@ -1,0 +1,19 @@
+[Unit]
+Description=Detection marche/arret machine (5 dernieres minutes du DVR)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Type=oneshot : le script analyse une fenetre puis rend la main. C'est le
+# timer qui le rappelle, pas une boucle interne — un plantage n'arrete donc
+# jamais la mesure, le tour suivant repart proprement.
+Type=oneshot
+User=mbelkhayat
+WorkingDirectory=/home/mbelkhayat/suivi-de-machine
+ExecStart=/home/mbelkhayat/suivi-de-machine/.venv/bin/python3 machine_etat/detecter_marche_arret.py
+# Une fenetre de 5 minutes se lit en bien moins que 5 minutes ; au-dela, c'est
+# que le DVR ne repond pas — on coupe pour ne pas chevaucher le tour suivant.
+TimeoutStartSec=240
+
+[Install]
+WantedBy=multi-user.target

@@ -40,3 +40,5 @@ signature_eval/frames_dvr_*/
 # signature_eval/prepare_day.sh vers resultats_multi_jours/<date>/ ;
 # ignoree ici en securite si un run est interrompu avant ce deplacement)
 /sessions_test_fragments.csv
+machine_etat/file_attente/
+__pycache__/

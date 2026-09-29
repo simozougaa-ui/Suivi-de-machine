@@ -1326,3 +1326,68 @@ remplacer chaque brique indépendamment :
 5. **Mesure de performance réelle** sur le Jetson (FPS, latence) pour
    éventuellement ajuster la fréquence d'inférence (ne pas forcément
    traiter chaque frame du flux).
+
+---
+
+# Détection marche / arrêt en production : du Jetson à l'application
+
+Mise en production de la méthode validée : `machine_etat/detecter_marche_arret.py`,
+lancé toutes les 5 minutes par un timer systemd, classe chaque minute et l'envoie à
+l'application de suivi de production (`suivi-production-imprimerie`), qui l'affiche
+sur une page réservée à l'administrateur.
+
+## Choix faits, et pourquoi
+
+**Timer systemd, pas cron.** Le dépôt déploie déjà par unités systemd
+(`deploy/suivi-presence.service`, `suivi-dashboard.service`) : ajouter du cron
+aurait fait cohabiter deux mécanismes. `Type=oneshot` + `.timer` plutôt qu'une
+boucle interne : un plantage n'arrête jamais la mesure, le tour suivant repart
+proprement, et `Persistent=true` rattrape un Jetson qui était éteint.
+
+**Fenêtre `[T-10min, T-5min]`.** Le direct est exclu (faux positifs, bug non
+résolu). Reste à choisir le retard : 5 minutes suffisent pour que le DVR ait fini
+d'écrire, et 5 minutes de fenêtre couvrent exactement l'intervalle entre deux
+tours — aucune minute n'est sautée ni analysée deux fois. Conséquence assumée :
+l'affichage a 5 à 10 minutes de retard sur le direct.
+
+**Aucune image écrite sur le disque.** Le cahier des charges demandait de nettoyer
+les frames après calcul ; ne jamais les écrire est plus sûr — il n'y a rien à
+nettoyer, donc rien ne reste si le script est tué en cours de route. Les frames
+sont décodées, comparées et jetées au fil de la lecture. `--garder-frames` reste
+disponible pour inspecter un cas douteux.
+
+**Une minute mal lue n'est pas envoyée.** Moins de 30 secondes analysées → minute
+ignorée. Avec 5 secondes, « 40 % de mouvement » ne veut rien dire, et une coupure
+de flux passerait pour un arrêt. L'application les affiche en gris et les compte à
+part : mieux vaut un trou honnête qu'un arrêt inventé.
+
+**Envoi par API, pas par connexion directe à PostgreSQL.** C'est le choix
+structurant. Le Jetson est un appareil posé dans l'atelier : y déposer l'URL
+externe de la base, c'est y déposer un accès complet en lecture et en écriture à
+toute la production (lots, coûts, comptes). Un jeton porteur ne permet, lui, que
+d'écrire des minutes d'état, et se révoque en changeant une variable
+d'environnement. S'ajoutent trois raisons pratiques : le schéma reste la propriété
+de l'application (une évolution de table ne demande pas de redéployer le Jetson) ;
+`requests` et `.env` sont déjà en place ici, là où une connexion directe exigerait
+`psycopg2` et le certificat Render ; et l'écriture est validée côté application
+(format de minute, état, pourcentage) au lieu de faire confiance au client.
+
+**File d'attente locale plutôt que perte.** Un envoi qui échoue (réseau coupé,
+application en redéploiement) part dans `machine_etat/file_attente/` et est rejoué
+au tour suivant, du plus ancien au plus récent. C'est sans risque parce que l'API
+est **idempotente** : une minute renvoyée remplace, ne duplique jamais. La file est
+bornée à 24 h de lots (288) — au-delà, l'incident dépasse ce qu'un rattrapage peut
+réparer, et on ne remplit pas le disque du Jetson.
+
+## Vérifications faites
+
+Logique de comparaison testée hors réseau sur images de synthèse : zone identique →
+pas de mouvement ; 5 % de pixels changés → mouvement ; 0,5 % → pas de mouvement
+(seuil 1,5 % respecté). Classement rejouant les cas réels validés : 86,7 % →
+marche, 0 % → arrêt, 13,3 % et 20 % → arrêt (les deux pics courts restent bien
+sous 40 %), et une minute à 10 secondes lues est ignorée. Fenêtre par défaut à
+15:03:40 → `[14:53, 14:58]`.
+
+Chaîne d'envoi testée contre l'application réelle lancée en local : envoi accepté,
+mauvais jeton refusé (401), réseau coupé → lot en file puis rejoué et file vidée,
+relecture côté application conforme.

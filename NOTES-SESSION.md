@@ -1529,3 +1529,116 @@ du service automatique.
   03:06-03:18, et le fonctionnement du timer systemd en conditions réelles
   (durée d'un passage avec le flou ajouté, absence de trou sur plusieurs
   passages consécutifs). Commandes de vérification données à Mohamed.
+
+---
+
+# Outils de réglage des zones de mouvement (2e machine, caméra 15)
+
+Outils locaux dans `outils_zones/`, pensés pour être lancés en UNE commande
+courte depuis Termux (téléphone) : le copier-coller de scripts de plusieurs
+lignes s'y corrompt. Aucun n'envoie quoi que ce soit à l'application de
+suivi — ce sont des outils de mesure, indépendants de
+`machine_etat/detecter_marche_arret.py` (non modifié) et du service
+systemd (non modifié).
+
+**Zones mesurées** (`outils_zones/zones.json`, pixels du flux 1280x720) :
+`A=[130,70,200,125]`, `B=[197,94,222,118]`, `C=[233,91,250,121]`,
+`D=[233,94,289,118]`. À modifier directement dans ce fichier JSON au fil
+des essais (pas de redéploiement de code nécessaire pour ajuster une
+zone).
+
+## zones.py — mesurer le mouvement sur un ou plusieurs instants
+
+Lit l'enregistrement à pleine cadence (15 im/s, aucune image sautée).
+Pour chaque seconde (15 images) et chaque zone, calcule le % de pixels
+dont l'amplitude (max - min sur les 15 images) dépasse 25, après gris +
+flou gaussien (5,5). Affiche par instant et par zone la moyenne, la
+médiane et le % de secondes au-dessus de 5 %, puis un tableau
+récapitulatif (une ligne par instant, une colonne par zone).
+
+    python3 outils_zones/zones.py 2026-09-30 10:38:00 2026-10-01 03:56:00 --duree 60
+
+(jour à 10:38 vs nuit à 03:56 ; `--duree` en secondes, défaut 60 ;
+plusieurs paires DATE HEURE acceptées à la suite pour comparer plus de
+deux instants en un seul passage).
+
+## zoom.py — comparer visuellement deux instants
+
+Écrit `outils_zones/sorties/zones_comparaison.jpg` : deux rangées (un
+instant par rangée), une colonne par zone de `zones.json`, chaque zone
+agrandie 5x (marge 10 px), rectangle de mesure exact dessiné en rouge,
+nom de zone + heure en gros caractères.
+
+    python3 outils_zones/zoom.py 2026-09-30 10:38:00 2026-10-01 03:56:00
+
+## quadrillage.py — repérer des coordonnées pixel
+
+Écrit `outils_zones/sorties/quadrillage.jpg` : coin haut-gauche de
+l'image (x 0-520, y 0-260) agrandi 3x, grille tous les 20 px,
+coordonnées en rouge (gros, taille de police 0,8) tous les 40 px — pour
+ajuster `zones.json` sans deviner les pixels à l'oeil.
+
+    python3 outils_zones/quadrillage.py 2026-09-30 10:38:00
+
+## servir.py — consulter les images depuis le téléphone
+
+Sert UNIQUEMENT `outils_zones/sorties/` (aucun autre fichier du dépôt),
+sur l'IP Tailscale du Jetson, port 8000. Se rabat sur 127.0.0.1 avec un
+message explicite si Tailscale est absent ou déconnecté — n'écoute
+jamais sur 0.0.0.0. Affiche l'URL à ouvrir ; Ctrl+C arrête proprement,
+sans trace d'erreur.
+
+    python3 outils_zones/servir.py
+
+## Décisions techniques (autonomes)
+
+- **Gris → flou → amplitude, même ordre que le correctif du 01/10** de
+  `detecter_marche_arret.py` : pour que les zones réglées ici avec
+  `zones.py` restent comparables à ce qui tournerait réellement en
+  production si elles sont adoptées pour la 2e machine.
+- **Amplitude max-min sur 15 images (une seconde), pas une différence
+  image-à-image** : plus sensible à un mouvement bref dans la seconde
+  (une pièce qui ne traverse la zone que sur 2-3 images sur 15) qu'une
+  comparaison à l'image précédente seule, tout en restant insensible au
+  bruit de capteur isolé (improbable qu'il dépasse le seuil sur les 15
+  images à la fois).
+- **Seuils séparés de `machine_etat/`** (`SEUIL_PIXEL=25` ici contre 12
+  dans le détecteur en production) : ce sont des outils de **réglage**
+  pour une caméra et des zones différentes (2e machine, caméra 15) — les
+  seuils de production ne sont pas supposés s'appliquer tels quels, et
+  les figer ici serait prématuré avant d'avoir des mesures réelles.
+- **Dernière seconde incomplète jetée** (dans `zones.py`, `<15` images
+  en fin de flux) plutôt que mesurée sur moins d'images : une amplitude
+  calculée sur 3 images n'est pas comparable à une amplitude sur 15, par
+  construction (moins de chances d'avoir capté le pic du mouvement).
+- **Fin de flux gérée par simple arrêt de lecture** (`capture.read()`
+  renvoie `ret=False`) plutôt qu'un mécanisme de timeout dédié : c'est
+  déjà le comportement de `src/camera_stream.py` partout ailleurs dans
+  ce dépôt, rien de plus robuste n'existe à reproduire ici, et ces
+  outils tournent une seule fois (pas de boucle de service à protéger).
+- **`outils_zones/sorties/` gitignoré** : images régénérées à la demande,
+  potentiellement volumineuses, propres à chaque test/Jetson.
+- **`servir.py` n'écoute jamais sur 0.0.0.0** : seule l'IP Tailscale
+  (réseau privé entre appareils de Mohamed) ou 127.0.0.1 en repli — pas
+  d'exposition sur le réseau Wi-Fi de l'atelier.
+- **Réservé à l'administrateur par construction** : ces outils ne
+  touchent à aucun fichier de `suivi-production-imprimerie`, ni à
+  `machine_etat/detecter_marche_arret.py`, ni au service systemd —
+  aucun changement visible par les autres utilisateurs de l'application.
+
+## Vérifications
+
+- `python3 -m unittest outils_zones.test_outils_zones -v` : **7/7**, sur
+  des images de synthèse (`fraction_mouvement` : zéro mouvement sur
+  images identiques, ~50 % détecté sur un changement couvrant la moitié
+  d'une zone, bruit léger sous le seuil ignoré ; géométrie des vignettes
+  de `zoom.py` et de la grille de `quadrillage.py`, y compris une zone
+  touchant le bord de l'image).
+- `py_compile` sans erreur sur les 5 scripts.
+- `servir.py` testé en local : repli sur 127.0.0.1 (Tailscale absent ici)
+  et réponse HTTP 200 confirmés.
+- **Non vérifié ici** (aucun accès DVR/Jetson depuis cet environnement) :
+  lecture réelle du flux `/cam/playback` à pleine cadence sur plusieurs
+  minutes, rendu visuel des JPEG produits sur de vraies images de la
+  caméra 15, et accès effectif via l'IP Tailscale depuis un téléphone. À
+  valider par Mohamed avec les commandes ci-dessus.

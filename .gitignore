@@ -45,4 +45,9 @@ machine_etat/file_attente/
 # doit jamais être committé (une valeur figée écraserait la vraie progression
 # au prochain git pull).
 machine_etat/curseur.json
+
+# Images produites par outils_zones/ (zones.py, zoom.py, quadrillage.py) :
+# regenerees a la demande depuis le DVR, propres a chaque test, jamais
+# commitees.
+outils_zones/sorties/
 __pycache__/

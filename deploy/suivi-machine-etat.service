@@ -11,9 +11,15 @@ Type=oneshot
 User=mbelkhayat
 WorkingDirectory=/home/mbelkhayat/suivi-de-machine
 ExecStart=/home/mbelkhayat/suivi-de-machine/.venv/bin/python3 machine_etat/detecter_marche_arret.py
-# Une fenetre de 5 minutes se lit en bien moins que 5 minutes ; au-dela, c'est
-# que le DVR ne repond pas — on coupe pour ne pas chevaucher le tour suivant.
-TimeoutStartSec=240
+# Correctif du 2026-10-01 : en pratique, lire + comparer 5 min de video prend
+# environ 6,5 min (le Jetson est plus lent que le temps reel pour ce calcul,
+# le flou ajoute encore un peu de travail par image) — PAS "bien moins que 5
+# minutes" comme le disait ce commentaire avant verification. 480s laisse une
+# marge au-dela de ces ~6,5 min observees ; en dessous, le tour est tue avant
+# d'avoir fini, pour rien (voir PLAFOND_RATTRAPAGE_MINUTES dans le script :
+# il ne tente jamais plus de 5 minutes de video par passage, justement pour
+# rester sous ce delai).
+TimeoutStartSec=480
 
 [Install]
 WantedBy=multi-user.target

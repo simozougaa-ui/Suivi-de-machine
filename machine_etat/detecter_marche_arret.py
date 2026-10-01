@@ -7,6 +7,10 @@ Une minute est classée « marche » quand plus de 40 % de ses secondes ont du
 mouvement, « arrêt » sinon.
 
     zone            x1=320, y1=200, x2=400, y2=240  (sur une frame 1280x720)
+    flou            GaussianBlur 7x7, sur l'image ENTIÈRE avant découpage de la
+                     zone (voir zone_grise) — sans lui, le bruit de capteur/
+                     compression déclenchait « marche » en continu, y compris
+                     machine à l'arrêt (correctif du 2026-10-01)
     seuil pixel     12    (différence d'intensité au-delà de laquelle un pixel
                            est dit « changé »)
     seuil fraction  0.015 (part de pixels changés au-delà de laquelle la seconde
@@ -15,10 +19,20 @@ mouvement, « arrêt » sinon.
 
 JAMAIS LE FLUX DIRECT. Le calcul sur le flux live donne des faux positifs (bug
 non résolu, voir NOTES-SESSION.md). On relit donc les ENREGISTREMENTS du DVR en
-RTSP playback, avec un retard volontaire : à l'instant T on analyse la fenêtre
-[T-10min, T-5min], ce qui laisse au DVR le temps d'avoir fini d'écrire. Les
-résultats affichés dans l'application ont donc 5 à 10 minutes de retard sur le
-direct — c'est le prix d'une mesure fiable, et c'est assumé.
+RTSP playback, avec un retard volontaire d'au moins RETARD_MINUTES (5 min), ce
+qui laisse au DVR le temps d'avoir fini d'écrire.
+
+REPRISE SANS TROU (correctif du 2026-10-01, voir NOTES-SESSION.md). Un passage
+automatique ne recalcule PAS sa fenêtre à partir de « maintenant » : il reprend
+pile où le précédent s'est arrêté (voir lire_curseur/ecrire_curseur,
+machine_etat/curseur.json). Avant ce correctif, un passage en retard sur son
+horaire (le timer met ~6,5 min à analyser 5 min de vidéo — plus lent que le
+temps réel) décalait silencieusement la fenêtre suivante, sautant les minutes
+entre les deux sans jamais les analyser ni les signaler comme « non mesurées ».
+Chaque passage traite au plus PLAFOND_RATTRAPAGE_MINUTES de vidéo (voir sa
+docstring) : le retard sur le direct peut donc grandir si le Jetson est
+durablement plus lent que le temps réel, mais plus aucune minute n'est perdue
+— seulement affichée plus tard.
 
 AUCUNE IMAGE N'EST ÉCRITE SUR LE DISQUE. Les frames sont décodées, comparées et
 jetées au fil de la lecture. C'est la forme la plus sûre de « nettoyer les images
@@ -81,15 +95,84 @@ DOSSIER_FILE = os.path.join(ROOT, "machine_etat", "file_attente")
 # ces heures-là, et on ne remplit pas le disque du Jetson indéfiniment.
 MAX_LOTS_EN_ATTENTE = 288          # 24 h de tours toutes les 5 minutes
 
+# --- Curseur de reprise (correctif du 2026-10-01) --------------------------
+# AVANT : chaque passage recalculait sa fenêtre à partir de « maintenant »
+# (fenetre_par_defaut), sans mémoire du passage précédent. Un passage en
+# retard (le timer met ~6,5 min à analyser 5 min de vidéo, voir
+# TimeoutStartSec ci-dessous et NOTES-SESSION.md) décalait donc la fenêtre
+# suivante vers l'avant SANS jamais revenir sur l'intervalle sauté — des
+# minutes entières (ex. 03:11-03:13 un jour donné) n'étaient simplement
+# jamais analysées, ni envoyées, ni marquées « non mesurées » : elles
+# disparaissaient silencieusement.
+#
+# MAINTENANT : la fin de la DERNIÈRE fenêtre analysée est écrite ici après
+# chaque passage automatique réussi. Le passage suivant reprend pile à cet
+# instant — ni trou, ni chevauchement — quel que soit son retard. Seul le
+# mode automatique (sans --date/--debut/--fin) lit et écrit ce fichier : un
+# rattrapage manuel pour inspecter une plage passée ne doit pas perturber la
+# progression du service.
+FICHIER_CURSEUR = os.path.join(ROOT, "machine_etat", "curseur.json")
+
+# Plafond de rattrapage par passage : volontairement égal à FENETRE_MINUTES,
+# pas plus. TimeoutStartSec=480s (voir deploy/suivi-machine-etat.service) et
+# la vitesse observée (~6,5 min pour analyser 5 min de vidéo, donc le Jetson
+# est PLUS LENT que le temps réel — le flou ajouté par ce correctif l'alourdit
+# encore un peu) donnent une marge sûre d'environ 6 min par passage. Un
+# plafond plus grand (ex. rattraper une heure d'un coup après une panne)
+# risquerait de se faire tuer par systemd en pleine fenêtre, perdant tout son
+# travail au lieu d'avancer d'un cran sûr. Avec ce plafond, un passage en
+# retard avance quand même systématiquement : le retard ne se résorbe pas en
+# un seul passage, mais ne grandit plus jamais sans borne au prix d'une perte
+# de données — seulement au prix d'un affichage plus tardif.
+PLAFOND_RATTRAPAGE_MINUTES = FENETRE_MINUTES
+
+
+def lire_curseur():
+    """Fin de la dernière fenêtre analysée avec succès, ou None si le service
+    n'a jamais tourné (ou si le fichier est illisible : on repart alors du
+    comportement par défaut plutôt que de planter)."""
+    try:
+        with open(FICHIER_CURSEUR, encoding="utf-8") as f:
+            valeur = json.load(f)["derniere_fin_analysee"]
+        return datetime.strptime(valeur, "%Y-%m-%dT%H:%M")
+    except (FileNotFoundError, KeyError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def ecrire_curseur(fin):
+    os.makedirs(os.path.dirname(FICHIER_CURSEUR), exist_ok=True)
+    with open(FICHIER_CURSEUR, "w", encoding="utf-8") as f:
+        json.dump({"derniere_fin_analysee": fin.strftime("%Y-%m-%dT%H:%M")}, f)
+
 
 def zone_grise(frame):
-    """Extrait la zone de travail en niveaux de gris.
+    """Extrait la zone de travail en niveaux de gris, flouté.
 
     Le gris suffit : on mesure un CHANGEMENT d'intensité, pas une couleur — et
     il divise par trois le travail de comparaison.
+
+    FLOU (correctif du 2026-10-01, voir NOTES-SESSION.md) : sans lui, le bruit
+    de capteur/compression pixel à pixel suffisait à dépasser SEUIL_PIXEL=12
+    sur une fraction de la zone supérieure à SEUIL_FRACTION=0.015 — la machine
+    était classée « marche » à 100 % des minutes alors qu'elle était à l'arrêt
+    (vérifié le 01/10, 03:06-03:18, la nuit, machine éteinte). Un
+    GaussianBlur(7,7) lisse ce bruit sans effacer un vrai mouvement, qui
+    change l'intensité sur une zone bien plus large qu'un pixel isolé.
+
+    ORDRE : gris PUIS flou PUIS découpage de la zone — jamais l'inverse.
+    Flouter après avoir découpé appliquerait le noyau 7x7 jusqu'au bord de la
+    zone en répétant les pixels de bordure (ou en les mettant à zéro, selon le
+    mode), ce qui fausserait le résultat sur toute la bande de ~3 px la plus
+    proche du bord. Flouter l'image ENTIÈRE d'abord utilise les vrais pixels
+    voisins, y compris hors zone, pour chaque pixel de la zone — exactement ce
+    que fait /tmp/minute.py, le script qui a servi à valider ce correctif
+    (0 à 8 % de mouvement sur les mêmes images, machine à l'arrêt, mêmes
+    seuils, au lieu de 100 %).
     """
+    gris = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    flou = cv2.GaussianBlur(gris, (7, 7), 0)
     x1, y1, x2, y2 = ZONE
-    return cv2.cvtColor(frame[y1:y2, x1:x2], cv2.COLOR_BGR2GRAY)
+    return flou[y1:y2, x1:x2]
 
 
 def seconde_avec_mouvement(precedente, courante):
@@ -248,11 +331,36 @@ def vider_la_file(url, jeton):
             return    # réseau encore coupé : inutile d'insister sur les suivants
 
 
-def fenetre_par_defaut(maintenant=None):
-    """[T-10min, T-5min], bornée à la minute pleine."""
+def fenetre_a_analyser(maintenant=None):
+    """Fenêtre à traiter par un passage AUTOMATIQUE (sans --date/--debut/--fin).
+
+    Reprend exactement après la fin du DERNIER passage réussi (voir
+    lire_curseur) : ni trou ni chevauchement, quel que soit le retard
+    accumulé. Sans curseur (premier lancement, ou fichier absent/illisible) :
+    se rabat sur [T-10min, T-5min], le comportement d'avant ce correctif.
+
+    Toujours bornée par `fin_securisee` (T-RETARD_MINUTES) : on ne lit jamais
+    une fenêtre plus récente que ce que le DVR a eu le temps d'écrire, retard
+    accumulé ou non. Et toujours bornée à PLAFOND_RATTRAPAGE_MINUTES de large
+    (voir sa docstring) : un passage en retard avance d'un cran sûr plutôt que
+    de tout rattraper d'un coup au risque de se faire tuer par le délai
+    systemd en pleine fenêtre.
+
+    Retourne (debut, fin, retard_restant). (None, None, None) si rien de
+    nouveau n'est encore disponible (déjà à jour avec le DVR) : ne pas
+    analyser une fenêtre vide ou négative.
+    """
     t = (maintenant or datetime.now()).replace(second=0, microsecond=0)
-    fin = t - timedelta(minutes=RETARD_MINUTES)
-    return fin - timedelta(minutes=FENETRE_MINUTES), fin
+    fin_securisee = t - timedelta(minutes=RETARD_MINUTES)
+
+    curseur = lire_curseur()
+    debut = curseur if curseur is not None else fin_securisee - timedelta(minutes=FENETRE_MINUTES)
+
+    if debut >= fin_securisee:
+        return None, None, None
+
+    fin = min(fin_securisee, debut + timedelta(minutes=PLAFOND_RATTRAPAGE_MINUTES))
+    return debut, fin, fin_securisee - fin
 
 
 def main():
@@ -272,14 +380,24 @@ def main():
         level=logging.DEBUG if args.verbeux else logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s")
 
+    # Mode automatique (timer systemd) = ni --date ni --debut ni --fin : seul
+    # ce mode lit/écrit le curseur de reprise (voir FICHIER_CURSEUR) — un
+    # rattrapage manuel pour inspecter une plage passée ne doit jamais faire
+    # avancer ou reculer la progression du service.
+    mode_auto = not (args.date or args.debut or args.fin)
+
     if args.date and args.debut and args.fin:
         jour = datetime.strptime(args.date, "%Y-%m-%d").date()
         debut = datetime.combine(jour, datetime.strptime(args.debut, "%H:%M").time())
         fin = datetime.combine(jour, datetime.strptime(args.fin, "%H:%M").time())
+        retard_restant = None
     elif args.date or args.debut or args.fin:
         ap.error("--date, --debut et --fin vont ensemble.")
     else:
-        debut, fin = fenetre_par_defaut()
+        debut, fin, retard_restant = fenetre_a_analyser()
+        if debut is None:
+            logger.info("Rien de nouveau à analyser pour l'instant (déjà à jour avec le DVR).")
+            return 0
 
     logger.info("Analyse des enregistrements de %s à %s",
                 debut.strftime("%Y-%m-%d %H:%M"), fin.strftime("%H:%M"))
@@ -291,6 +409,21 @@ def main():
     for l in lignes:
         logger.info("  %s  %-6s  %5.1f %% de mouvement (%d s)",
                     l["minute"], l["etat"], l["pourcentage"], l["secondes_analysees"])
+
+    if mode_auto:
+        # Écrit APRÈS un analyser_fenetre() qui n'a pas levé d'exception, donc
+        # après une lecture DVR terminée normalement (voir sa docstring) —
+        # qu'il y ait ou non des minutes exploitables dedans (classer() peut
+        # toutes les rejeter pour trop peu de secondes lues). La fenêtre a été
+        # TENTÉE : on avance, un trou honnête ne se retente pas indéfiniment.
+        # Indépendant de l'envoi à l'API (ci-dessous) : la file d'attente gère
+        # déjà les échecs réseau séparément, pas la peine de relire le DVR en
+        # plus si l'application est injoignable.
+        ecrire_curseur(fin)
+        if retard_restant and retard_restant > timedelta(0):
+            logger.warning(
+                "Fenêtre traitée, mais %s de retard restent à rattraper "
+                "(repris automatiquement au prochain passage).", retard_restant)
 
     if args.sans_envoi:
         return 0

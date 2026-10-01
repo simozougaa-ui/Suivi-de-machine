@@ -1391,3 +1391,141 @@ sous 40 %), et une minute à 10 secondes lues est ignorée. Fenêtre par défaut
 Chaîne d'envoi testée contre l'application réelle lancée en local : envoi accepté,
 mauvais jeton refusé (401), réseau coupé → lot en file puis rejoué et file vidée,
 relecture côté application conforme.
+
+---
+
+# Correctif détection marche/arrêt : flou avant comparaison + reprise sans trou
+
+Deux bugs signalés par Mohamed après observation en production (machine_etat/
+detecter_marche_arret.py), vérifiés le 01/10 sur la plage 03:06-03:18 (nuit,
+machine à l'arrêt) : classée « marche » à 100 % des minutes. Le correctif
+est écrit et testé ici (unités synthétiques, sans DVR ni Jetson accessibles
+depuis cet environnement) ; à valider en conditions réelles par Mohamed.
+
+## Décisions techniques (autonomes)
+
+**Bug 1 — absence de flou.** `zone_grise()` ne faisait qu'un découpage +
+`cvtColor` en gris : le bruit de capteur/recompression, pixel à pixel,
+suffisait à dépasser `SEUIL_PIXEL=12` sur plus de `SEUIL_FRACTION=0,015` de
+la zone — un faux mouvement à chaque seconde, donc une minute à 100 %.
+`GaussianBlur((7,7), 0)` lisse ce bruit (il moyenne un voisinage, un vrai
+mouvement reste détecté car il change l'intensité sur une zone bien plus
+large qu'un pixel isolé) ; **seuils inchangés**, comme demandé — c'est bien
+le signal d'entrée qui était bruité, pas les seuils qui étaient mal réglés.
+
+**Ordre des opérations : gris → flou → découpage de la zone, jamais
+l'inverse.** Flouter APRÈS avoir découpé appliquerait le noyau 7x7 jusqu'au
+bord de la zone en extrapolant les pixels de bordure, faussant le résultat
+sur toute la bande d'environ 3 px la plus proche du bord (la moitié de la
+zone fait seulement 40 px de haut : non négligeable). Flouter l'image
+ENTIÈRE d'abord utilise les vrais pixels voisins, y compris hors zone, pour
+chaque pixel de la zone — reproduit exactement l'ordre de `/tmp/minute.py`
+(le script de validation de Mohamed, 0-8 % sur les mêmes images contre
+100 % avant correctif, mêmes seuils).
+
+**Bug 2 — fenêtre recalculée depuis « maintenant » à chaque passage.** Le
+timer vise toutes les 5 minutes, mais un passage prend en réalité environ
+6,5 minutes (plus lent que le temps réel — décoder + comparer 5 min de
+vidéo à 15 fps coûte plus cher que la fenêtre qu'elles couvrent). L'ancien
+code recalculait `[T-10min, T-5min]` à partir de l'heure d'exécution
+réelle : un passage en retard sautait donc purement et simplement les
+minutes entre la fin du passage précédent et son propre début — ni
+analysées, ni envoyées, ni même signalées comme « non mesurées » (cas
+observé : 03:11-03:13 un jour donné).
+
+**Curseur de reprise persistant (`machine_etat/curseur.json`, gitignoré —
+propre à chaque Jetson).** Après chaque passage AUTOMATIQUE réussi (lecture
+DVR terminée sans exception, que l'envoi à l'API ait réussi ou non), la fin
+de la fenêtre analysée est écrite sur disque. Le passage suivant reprend
+pile à cet instant, quel que soit son retard — plus aucune minute ne peut
+être silencieusement sautée. Choix délibéré : le curseur avance dès que la
+fenêtre a été TENTÉE (lue jusqu'au bout), indépendamment du nombre de
+minutes effectivement exploitables dedans (`classer()` peut toutes les
+rejeter pour trop peu de secondes lues, voir sa docstring déjà existante
+« mieux vaut un trou honnête qu'un arrêt inventé ») — sinon une coupure DVR
+ponctuelle bloquerait indéfiniment la progression sur la même fenêtre.
+
+**Plafond de rattrapage = FENETRE_MINUTES (5 min), pas plus.** Avec
+`TimeoutStartSec=480s` et la vitesse observée (~6,5 min de calcul pour 5 min
+de vidéo, donc ~78s de calcul par minute de vidéo), une seule fenêtre ne
+peut pas dépasser environ 6 minutes sans risquer d'être tuée par systemd en
+plein calcul — perdant alors TOUT le travail de ce passage, pas seulement
+le surplus. Un plafond de rattrapage plus généreux (ex. rattraper une heure
+d'un coup après une panne) aurait donc été contre-productif. Avec ce
+plafond, un passage en retard avance systématiquement d'un cran sûr : le
+retard sur le direct peut continuer à grandir si le Jetson reste
+durablement plus lent que le temps réel (c'est un problème de capacité de
+calcul, pas d'exactitude), mais plus aucune donnée n'est perdue en route —
+seulement affichée plus tard. Au repos (déjà à jour), un passage ne lit
+rien et se termine immédiatement.
+
+**TimeoutStartSec du service : 240 → 480.** Mohamed a signalé la valeur 480
+comme celle réellement en service sur le Jetson (déjà ajustée manuellement,
+pas encore remontée dans ce dépôt) ; le commentaire d'origine affirmant
+qu'une fenêtre « se lit en bien moins que 5 minutes » était faux d'après
+les mesures réelles (~6,5 min) — corrigé dans
+`deploy/suivi-machine-etat.service` pour refléter la réalité mesurée plutôt
+que l'hypothèse de départ.
+
+**Mode manuel (`--date/--debut/--fin`) : n'écrit jamais le curseur.** Une
+vérification ponctuelle d'une plage passée (ex. revalider le 01/10
+03:06-03:18 après ce correctif) ne doit pas interférer avec la progression
+du service automatique.
+
+### Fichiers modifiés
+
+- **`machine_etat/detecter_marche_arret.py`** :
+  - `zone_grise()` : gris + `GaussianBlur((7,7), 0)` sur l'image entière,
+    PUIS découpage de la zone (ordre inversé par rapport à avant).
+  - Nouvelles constantes `FICHIER_CURSEUR`, `PLAFOND_RATTRAPAGE_MINUTES`.
+  - Nouvelles fonctions `lire_curseur()`/`ecrire_curseur(fin)`.
+  - `fenetre_par_defaut()` remplacée par `fenetre_a_analyser()` (reprise
+    depuis le curseur, plafonnée, renvoie `(None, None, None)` si déjà à
+    jour).
+  - `main()` : distingue mode automatique / rattrapage manuel
+    (`mode_auto`), écrit le curseur après un passage automatique réussi,
+    journalise le retard restant s'il y en a.
+  - En-tête du module mis à jour (flou, reprise sans trou).
+- **`machine_etat/test_detecter_marche_arret.py`** (nouveau) : 7 tests
+  `unittest` (bibliothèque standard, aucune nouvelle dépendance) —
+  3 pour le flou (bruit faible ne déclenche pas, changement de forte
+  amplitude déclenche, et une preuve que le même bruit déclenche bien À
+  TORT sans flou, pour que ce test ait une vraie valeur de non-régression),
+  4 pour la reprise (sans curseur = comportement d'avant, reprise exacte
+  sans trou, rattrapage plafonné avec retard signalé, rien à faire si déjà
+  à jour).
+- **`deploy/suivi-machine-etat.service`** : `TimeoutStartSec` 240 → 480,
+  commentaire corrigé (voir plus haut).
+- **`.gitignore`** : `machine_etat/curseur.json` (propre à chaque Jetson,
+  ne doit jamais être committé).
+
+### Choix de portée (documentés)
+
+- **Les seuils de détection (`SEUIL_PIXEL`, `SEUIL_FRACTION`,
+  `SEUIL_MINUTE_POURCENT`) ne sont pas touchés**, comme demandé — seul le
+  signal d'entrée (image) est nettoyé avant d'y appliquer ces seuils déjà
+  validés.
+- **Le débit de calcul lui-même n'est pas optimisé** (ex. ne flouter/
+  comparer qu'un voisinage élargi de la zone plutôt que l'image 1280x720
+  entière, ce qui réduirait le temps de calcul ajouté par le flou). Écarté
+  ici pour rester fidèle à `/tmp/minute.py` (le script de validation de
+  Mohamed) à l'identique, au prix d'un peu plus de calcul par image — à
+  reconsidérer si le retard sur le direct devient gênant en pratique.
+- **`file_attente/` (échecs d'envoi à l'API) et `curseur.json` (progression
+  de lecture du DVR) restent deux mécanismes séparés**, volontairement : un
+  problème réseau ne doit pas faire relire le DVR, une coupure DVR ne doit
+  pas bloquer indéfiniment l'envoi des minutes déjà classées.
+
+### Vérifications
+
+- `python3 -m unittest machine_etat.test_detecter_marche_arret -v` :
+  **7/7**, y compris la preuve que le bruit testé déclenche bien à tort
+  sans flou (le test engage réellement le correctif, pas un filet de
+  sécurité qui passerait de toute façon).
+- `python3 -c "import py_compile; py_compile.compile(..., doraise=True)"` :
+  sans erreur.
+- **Non vérifié ici** (aucun accès DVR/Jetson depuis cet environnement de
+  développement) : le comportement réel sur un enregistrement du 01/10
+  03:06-03:18, et le fonctionnement du timer systemd en conditions réelles
+  (durée d'un passage avec le flou ajouté, absence de trou sur plusieurs
+  passages consécutifs). Commandes de vérification données à Mohamed.

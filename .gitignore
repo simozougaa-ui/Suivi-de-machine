@@ -41,4 +41,8 @@ signature_eval/frames_dvr_*/
 # ignoree ici en securite si un run est interrompu avant ce deplacement)
 /sessions_test_fragments.csv
 machine_etat/file_attente/
+# Curseur de reprise (correctif du 2026-10-01) : propre à chaque Jetson, ne
+# doit jamais être committé (une valeur figée écraserait la vraie progression
+# au prochain git pull).
+machine_etat/curseur.json
 __pycache__/

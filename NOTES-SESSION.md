@@ -1708,3 +1708,147 @@ après avoir mesuré que celui-ci ne suffit pas.
   vidéo) après `git pull` + redémarrage du service, pour voir si le calcul
   repasse sous les 300 s (le retard cesserait de grossir) ou reste
   au-dessus (retard qui grossit plus lentement, mais pas résolu).
+
+---
+
+# Ajout de la machine 2 (2026-10-01 ter)
+
+Deuxième machine (« la machine de devant »), même caméra 15, même flux,
+envoyée sous `machine-2`, avec sa propre zone (zone C de
+`outils_zones/zones.json`) et sa propre méthode — validée par Mohamed via
+`outils_zones/zones.py` : marche de jour 100 %, marche de nuit 55 %, arrêt
+10 % de secondes en mouvement, mêmes seuils ci-dessous.
+
+## Décisions techniques (autonomes)
+
+**Une seule lecture vidéo, deux méthodes indépendantes.** `analyser_fenetre()`
+retourne maintenant `(par_minute_m1, par_minute_m2)` : chaque frame décodée
+alimente les deux pipelines dans la même boucle. Machine 1 reste
+**strictement inchangée** (`zone_grise`, `seconde_avec_mouvement`, `ZONE`,
+`SEUIL_PIXEL`, `SEUIL_FRACTION` : aucune ligne touchée) et ne garde qu'1
+image/s comme avant. Machine 2 travaille à **pleine cadence** (15 images/s,
+méthode validée par Mohamed) : `gris_floute_m2()` (gris → flou(5,5) sur
+l'image entière, même ordre et même raison que machine 1 — éviter les
+artefacts de bord) puis `amplitude_zone_m2()` (amplitude max-min sur les 15
+images de la seconde, zone C). `TestMachine1InchangeeParMachine2` compare le
+résultat machine 1 bit à bit, machine 2 active ou non : c'est la preuve
+demandée, pas une supposition.
+
+**Conséquence de performance assumée (voir « Vérifier la durée » ci-dessous)**
+: la machine 2 ayant besoin de TOUTES les images, l'optimisation `grab()`
+du correctif précédent (2026-10-01 bis) ne s'applique plus quand elle est
+active — chaque image redevient entièrement décodée. Le calcul machine 2
+lui-même (flou 5x5 sur une image déjà décodée + découpage 17x30 px) est bon
+marché ; le coût qui revient est celui du décodage complet des 14
+images/15 qu'on pouvait auparavant se contenter de `grab()`. Avec
+`MACHINE2_ACTIVE=0`, le code reprend EXACTEMENT le chemin `grab()` d'avant
+(voir le `if not calculer_machine2 and index % pas != 0` dans
+`analyser_fenetre`), donc aucune régression dans ce cas.
+
+**Curseur par machine, qui n'avance qu'après mise en sécurité.** Avant ce
+correctif, `ecrire_curseur(fin)` était appelé juste après la lecture DVR,
+AVANT même de tenter l'envoi — l'envoi pouvait donc échouer (ou pire, le
+processus être tué pendant l'envoi) sans que le curseur ne recule, perdant
+silencieusement la fenêtre si la mise en file elle-même ne s'exécutait
+jamais. Corrigé : `traiter_envoi_machine()` n'appelle `ecrire_curseur()`
+qu'après un envoi réussi OU une mise en file **réussie** (le fichier JSON de
+retransmission a bien été écrit sur le disque — à ce stade la donnée est
+durable, la relire ne rapporterait rien) ; si même la mise en file échoue
+(ex. disque plein), le curseur n'avance PAS et la fenêtre sera rejouée au
+prochain passage. Chaque machine a sa propre clé dans `curseur.json`
+(`{"machine-1": "...", "machine-2": "..."}`), avec migration automatique de
+l'ancien format mono-valeur (`lire_curseur` : une entrée
+`"derniere_fin_analysee"` ne concernait que `machine-1`, seule machine
+suivie à l'époque).
+
+**La fenêtre partagée repart du curseur le MOINS avancé.** Une seule lecture
+vidéo sert les deux machines (impossible de lire le flux deux fois sans
+doubler le coût) : `fenetre_a_analyser(machines, ...)` prend le minimum des
+curseurs connus parmi les machines actives. Si machine-2 est en retard
+(son dernier envoi a échoué) pendant que machine-1 est à jour, la fenêtre
+repart de machine-2 — jamais de la plus avancée, pour ne sauter aucune
+machine. Conséquence mineure acceptée : machine-1 peut alors reclasser et
+retenter d'envoyer des minutes déjà confirmées (filtré en amont dans
+`main()` via son propre curseur, mais pas à 100 % si le chevauchement est
+partiel) — sans risque, l'API est idempotente (un renvoi remplace, ne
+duplique jamais).
+
+**`ecrire_curseur` ne régresse jamais.** Conséquence du point précédent : si
+machine-1 a déjà confirmé au-delà de `fin` avant que la fenêtre ne reparte
+plus tôt pour machine-2, un appel `ecrire_curseur("machine-1", fin)` ne doit
+pas faire reculer son curseur déjà plus avancé. Vérifié par construction
+dans `ecrire_curseur` (compare à la valeur actuelle avant d'écrire), pas
+laissé à la discipline des appelants.
+
+**Échec isolé par machine.** `traiter_envoi_machine()` est appelé une fois
+par machine, chacun dans son propre bloc `try/except` indépendant : un POST
+qui échoue pour `machine-2` n'empêche ni l'envoi ni l'avancement du curseur
+de `machine-1`, et réciproquement. `vider_la_file()` reste un appel UNIQUE
+partagé (chaque lot porte déjà son `machine_id`, inutile de parcourir le
+dossier deux fois).
+
+**`--sans-envoi` couvre les deux machines.** Calcule et journalise les deux,
+n'envoie rien, n'écrit aucun curseur (`mode_auto` reste séparé de
+`--sans-envoi` dans `traiter_envoi_machine` : appelé uniquement si
+`not args.sans_envoi`).
+
+**`MACHINE2_ACTIVE` et `MACHINE2_ETAT_ID` lus à l'appel** (dans
+`config_machine2()`, comme `config_api()` pour machine 1) et non au
+chargement du module : modifiables dans `.env` sans toucher au code, comme
+demandé.
+
+## Vérifier la durée (demandé explicitement, point 5)
+
+Estimation par le code, PAS mesurée ici (aucun accès DVR/Jetson) : le calcul
+machine 2 lui-même (flou 5x5 + découpage 17x30 px, par image déjà décodée)
+est négligeable face au décodage RTSP. Le vrai surcoût est la perte de
+l'optimisation `grab()` du correctif précédent — c'est-à-dire que le temps
+de calcul avec machine 2 active devrait se rapprocher du temps **d'avant**
+ce correctif (~358 s pour 300 s de vidéo, déjà mesuré en production ce
+jour), pas du temps observé juste après (`grab()` seul, pas encore connu au
+moment d'écrire ce correctif). Si ce chiffre est confirmé proche ou
+au-dessus de 300 s, le problème de retard qui grossit sans fin (voir
+correctif du 2026-10-01 bis) REVIENDRA avec machine 2 active, malgré la
+reprise sans trou par curseur (qui évite la perte de données, pas la
+lenteur). **Mesure à faire par Mohamed** : comparer
+`"Machine 1 : X minute(s) classée(s) en Y s"` (logs) avec machine 2 active
+vs `MACHINE2_ACTIVE=0`. Si Y dépasse 300 s avec machine 2 active, c'est
+confirmé, et il faudra revenir sur le décodage matériel (NVDEC/GStreamer)
+déjà évoqué comme prochaine piste dans le correctif précédent — mesuré
+avant d'être tenté, pas deviné.
+
+`MACHINE2_ACTIVE` vaut `1` par défaut (demandé explicitement) : la machine 2
+sera donc active dès ce déploiement, sans étape intermédiaire. Si le retard
+grossit après déploiement, `MACHINE2_ACTIVE=0` dans `.env` + redémarrage du
+service revient instantanément au comportement d'avant (machine 1 seule,
+chemin `grab()` repris automatiquement), le temps de traiter la vraie cause.
+
+## Hors de portée (documenté, pas oublié)
+
+L'application `suivi-production-imprimerie` n'a pas été touchée : si sa page
+admin suppose une liste fixe de machines plutôt que de les découvrir par
+`machine_id` reçu, `machine-2` pourrait ne pas apparaître automatiquement.
+Pas vérifié depuis cet environnement (changement hors du périmètre demandé,
+qui ne portait que sur ce script) — à vérifier par Mohamed une fois les
+premières minutes de machine-2 envoyées.
+
+## Vérifications
+
+- `python3 -m unittest machine_etat.test_detecter_marche_arret -v` :
+  **21/21** (9 précédents, mis à jour pour les nouvelles signatures
+  `lire_curseur`/`ecrire_curseur`/`fenetre_a_analyser` avec `machine_id`, +
+  12 nouveaux). Nouveaux : amplitude machine 2 sur mouvement/bruit, minute
+  marche/arrêt classée par le pipeline complet (`analyser_fenetre` +
+  `classer`, pas seulement la fonction isolée), résultat machine 1
+  identique bit à bit que machine 2 active ou non, fenêtre partagée qui
+  repart du curseur le moins avancé, curseur qui ne régresse jamais,
+  migration de l'ancien format, échec machine 2 sans effet sur machine 1,
+  curseur non avancé si la mise en file échoue aussi, rien-à-envoyer qui
+  avance quand même le curseur, `--sans-envoi` qui n'écrit aucun curseur.
+- `py_compile` sans erreur.
+- **Non vérifié ici** (aucun accès DVR/Jetson) : le vrai temps de calcul
+  avec machine 2 active (voir « Vérifier la durée » ci-dessus), la
+  classification réelle sur les plages déjà mesurées par Mohamed
+  (30/09 10:38, 01/10 03:56, 01/10 14:45), et si `machine-2` apparaît
+  correctement côté application. Commandes de vérification données à
+  Mohamed.

@@ -1642,3 +1642,69 @@ sans trace d'erreur.
   minutes, rendu visuel des JPEG produits sur de vraies images de la
   caméra 15, et accès effectif via l'IP Tailscale depuis un téléphone. À
   valider par Mohamed avec les commandes ci-dessus.
+
+---
+
+# Correctif de perf : grab() au lieu de read() sur les images jetées (2026-10-01 bis)
+
+Constaté en production via SSH sur le Jetson (page « État de la machine »
+bloquée vers 17h alors qu'il était 20h44) : le correctif du 01/10 (flou +
+reprise sans trou) a bien supprimé les trous, mais le retard sur le direct
+grossit sans fin. Logs confirmés (`journalctl -u suivi-machine-etat.service`) :
+chaque fenêtre fait exactement 5 min (300 s) de vidéo et le calcul
+(`analyser_fenetre` + `classer`) prend **~358 s** à chaque passage — le
+Jetson traite donc la vidéo ~1,19x plus lentement que le temps réel, et
+`curseur.json`/les logs montraient le « retard restant » augmenter de 1 min
+toutes les ~6 min, de façon parfaitement régulière. Ce n'était pas une
+panne (`systemctl status` : timer et service actifs, service en cours
+d'exécution normale) — exactement le compromis accepté par écrit lors du
+correctif du 01/10 (« le retard peut croître si le Jetson reste plus lent
+que le temps réel »), mais en pratique bien pire que prévu.
+
+## Décision technique (autonome)
+
+**Cause trouvée en lisant le code, pas en devinant** : `analyser_fenetre()`
+appelait `capture.read()` (décodage complet + conversion couleur) sur
+**chacune des 15 images par seconde** du flux, alors qu'une seule sur 15
+est réellement gardée et analysée (`pas = round(FPS_SUPPOSE) = 15`) — les
+14 autres étaient décodées en entier puis immédiatement jetées
+(`if index % pas != 0: continue`).
+
+**Correctif** : sur les images qu'on va jeter, `capture.grab()` à la place
+de `capture.read()` — `grab()` avance le flux sans décoder/convertir la
+couleur (contrairement à `read()` = `grab()` + `retrieve()`), alors que
+`read()` reste utilisé exactement comme avant sur la seule image gardée
+par seconde. Aucun changement de résultat possible : la sélection des
+images (quelle image devient `courante`, laquelle devient `precedente`)
+est strictement identique à avant, seul le travail sur les images jetées
+disparaît — prouvé par les deux nouveaux tests ci-dessous plutôt que
+supposé.
+
+**Pourquoi pas une refonte plus large** (ex. décodage matériel NVDEC via
+GStreamer, sous-échantillonnage du flux DVR) : je n'ai aucun accès au
+Jetson ni au DVR depuis cet environnement pour mesurer le VRAI gain ni
+valider que ça ne casse rien (format de pixel différent, pipeline GStreamer
+spécifique au DVR Dahua à découvrir). Ce correctif est strictement sans
+risque (même sélection d'images, fonctions de calcul inchangées) et facile
+à vérifier par Mohamed avec le même log `"X minute(s) classée(s) en Y s"`
+déjà en place. Si le gain est insuffisant (le décodage H.264 lui-même,
+pas seulement la conversion couleur, peut être le vrai goulot sur ce
+Jetson), le décodage matériel sera la prochaine piste — mais seulement
+après avoir mesuré que celui-ci ne suffit pas.
+
+## Vérifications
+
+- `python3 -m unittest machine_etat.test_detecter_marche_arret -v` :
+  **9/9** (7 précédents + 2 nouveaux). Les deux nouveaux tests utilisent un
+  `FakeCapture` synthétique (grab()/read() en mémoire, aucun flux réel) :
+  l'un vérifie le nombre exact d'appels à `grab()` vs `read()` par fenêtre,
+  l'autre fabrique des images jetées contenant un changement franc dans la
+  zone et vérifie qu'elles n'influencent jamais le résultat (preuve qu'il
+  n'y a pas de décalage d'un cran dans la sélection des images).
+- `py_compile` sans erreur.
+- **Non vérifié ici** (aucun accès DVR/Jetson) : le vrai gain de temps en
+  conditions réelles. Mohamed doit comparer le nouveau
+  `"X minute(s) classée(s) en Y s"` (logs) à l'ancien (~358 s pour 300 s de
+  vidéo) après `git pull` + redémarrage du service, pour voir si le calcul
+  repasse sous les 300 s (le retard cesserait de grossir) ou reste
+  au-dessus (retard qui grossit plus lentement, mais pas résolu).

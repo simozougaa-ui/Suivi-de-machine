@@ -21,6 +21,7 @@ import sys
 import tempfile
 import unittest
 from datetime import datetime, timedelta
+from unittest import mock
 
 import numpy as np
 
@@ -34,6 +35,37 @@ from detecter_marche_arret import (  # noqa: E402
 
 LARGEUR, HAUTEUR = 1280, 720
 GRIS_FOND = 100
+
+
+class FakeCapture:
+    """Simule un cv2.VideoCapture : consomme `frames` dans l'ordre, via
+    grab() (avance sans decoder) ou read() (avance ET decode), comme un
+    VRAI flux RTSP le ferait — pas de retour arriere, pas de double lecture
+    de la meme position."""
+
+    def __init__(self, frames):
+        self._frames = frames
+        self._pos = 0
+        self.appels_grab = 0
+        self.appels_read = 0
+
+    def grab(self):
+        self.appels_grab += 1
+        if self._pos >= len(self._frames):
+            return False
+        self._pos += 1
+        return True
+
+    def read(self):
+        self.appels_read += 1
+        if self._pos >= len(self._frames):
+            return False, None
+        frame = self._frames[self._pos]
+        self._pos += 1
+        return True, frame
+
+    def release(self):
+        pass
 
 
 def frame_bruitee(graine, amplitude):
@@ -95,6 +127,67 @@ class TestFlouAvantComparaison(unittest.TestCase):
             fraction, SEUIL_FRACTION,
             "ce bruit doit dépasser le seuil SANS flou (sinon ce test ne "
             "prouve rien sur l'utilité du flou)."
+        )
+
+
+class TestLectureEfficace(unittest.TestCase):
+    """Correctif de perf du 2026-10-01 bis (voir NOTES-SESSION.md) :
+    analyser_fenetre() ne doit decoder (read()) QUE l'image gardee par
+    seconde, et seulement grab() (sans decoder) les 14 autres — sans changer
+    ni la selection des images ni le resultat du classement."""
+
+    def _fond_uniforme(self):
+        return np.full((HAUTEUR, LARGEUR, 3), GRIS_FOND, dtype=np.uint8)
+
+    def test_une_image_decodee_par_seconde_le_reste_en_grab(self):
+        secondes = 3
+        fond = self._fond_uniforme()
+        frames = [fond.copy() for _ in range(secondes * 15)]
+        fake = FakeCapture(frames)
+        debut = datetime(2026, 10, 1, 18, 20, 0)
+        fin = debut + timedelta(seconds=secondes)
+
+        with mock.patch.object(dma, "open_stream", return_value=fake), \
+                mock.patch.object(dma, "build_rtsp_playback_url", return_value="rtsp://factice"):
+            par_minute = dma.analyser_fenetre(debut, fin)
+
+        # secondes appels a read() (un par image gardee) + UN appel qui
+        # echoue en fin de flux (meme comportement de fin qu'avant ce
+        # correctif) ; le reste (14 images sur 15) passe par grab().
+        self.assertEqual(fake.appels_read, secondes + 1)
+        self.assertEqual(fake.appels_grab, secondes * 14)
+
+        minute = debut.replace(second=0, microsecond=0)
+        avec, total = par_minute[minute]
+        self.assertEqual(total, secondes - 1)  # N images gardees = N-1 comparaisons
+        self.assertEqual(avec, 0)
+
+    def test_les_images_jetees_ne_sont_jamais_comparees(self):
+        """Les images jetees (grab()) contiennent un changement franc dans la
+        zone ; si elles finissaient quand meme par etre comparees (bug de
+        selection introduit par ce correctif), ca se verrait ici."""
+        fond = self._fond_uniforme()
+        bruit = fond.copy()
+        x1, y1, x2, y2 = ZONE
+        bruit[y1:y2, x1:x2] = 250
+
+        secondes = 2
+        frames = [fond.copy() if i % 15 == 0 else bruit.copy() for i in range(secondes * 15)]
+        fake = FakeCapture(frames)
+        debut = datetime(2026, 10, 1, 18, 20, 0)
+        fin = debut + timedelta(seconds=secondes)
+
+        with mock.patch.object(dma, "open_stream", return_value=fake), \
+                mock.patch.object(dma, "build_rtsp_playback_url", return_value="rtsp://factice"):
+            par_minute = dma.analyser_fenetre(debut, fin)
+
+        minute = debut.replace(second=0, microsecond=0)
+        avec, total = par_minute[minute]
+        self.assertEqual(total, secondes - 1)
+        self.assertEqual(
+            avec, 0,
+            "une image jetee (grab()) a influence le resultat : la sélection "
+            "d'image ne correspond plus à avant ce correctif."
         )
 
 

@@ -208,12 +208,25 @@ def analyser_fenetre(debut, fin, garder_frames=None):
 
     try:
         while True:
+            if index % pas != 0:
+                # Image qu'on va jeter (une seule sur `pas` est gardée) :
+                # grab() avance le flux SANS décoder la couleur (contrairement
+                # à read() = grab()+retrieve()). Correctif de perf du
+                # 2026-10-01 bis (voir NOTES-SESSION.md) : la fenêtre entière
+                # mettait plus de temps à analyser qu'à durer (~358 s pour 300 s
+                # de vidéo), le retard grossissait sans fin malgré la reprise
+                # sans trou. Les images gardées et zone_grise() ne changent
+                # pas d'un pixel : seul le travail sur les 14 images/15 jetées
+                # disparaît.
+                ok = capture.grab()
+                if not ok:
+                    break
+                index += 1
+                continue
+
             ok, frame = capture.read()
             if not ok:
                 break
-            if index % pas != 0:
-                index += 1
-                continue
 
             instant = debut + timedelta(seconds=gardees)
             if instant >= fin:

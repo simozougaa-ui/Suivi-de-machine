@@ -1852,3 +1852,117 @@ premières minutes de machine-2 envoyées.
   (30/09 10:38, 01/10 03:56, 01/10 14:45), et si `machine-2` apparaît
   correctement côté application. Commandes de vérification données à
   Mohamed.
+
+---
+
+# outils_zones/seuils.py : recherche du seuil de pixel (2026-10-02)
+
+Constat terrain de Mohamed : `zones_s10.py` (copie locale de `zones.py` au
+Jetson, seuil de pixel 10, non versionnée — voir plus bas) donne de faux
+« en mouvement » le soir sur la zone C (machine 2 à l'arrêt à 20:31, zone C
+mesurée à 90-100 % de secondes en mouvement avec ce seuil) ; `zones.py`
+(seuil 25) voit bien l'arrêt mais risque de rater la marche de nuit (marge
+déjà mesurée faible : 55 % en marche de nuit contre 10 % à l'arrêt avec
+les seuils de production, voir le correctif de la machine 2). Nouvel outil
+`outils_zones/seuils.py` pour tester plusieurs seuils à la fois sur les
+mêmes instants et trouver celui qui sépare marche et arrêt partout.
+
+## Décisions techniques (autonomes)
+
+**Une seule lecture par instant, N seuils évalués dessus.** `zones.py`
+calcule `fraction_mouvement(images, zone, seuil_pixel)` — un seuil fixe par
+appel, donc relire ou refaire le calcul par seuil testé serait coûteux (un
+instant fait déjà ~1 min à lire). `seuils.py` sépare le calcul en deux :
+`amplitude_zone()` calcule l'amplitude max-min par pixel UNE SEULE FOIS par
+zone et par seconde, puis `fraction_au_dessus(amplitude, seuil)` évalue
+cette amplitude déjà calculée contre chaque seuil demandé — coût de
+lecture/décodage payé une fois, quel que soit le nombre de seuils (5 par
+défaut, pas de limite côté code).
+
+**`zones.py` réutilisé, pas réécrit.** `seuils.py` importe `FPS`, `FLOU`,
+`SEUIL_SECONDE_POURCENT` directement depuis `zones.py` (pas de constantes
+dupliquées en dur) : même cadence, même flou (5,5), même seuil de seconde
+« en mouvement » (5 %) que l'outil déjà validé. `zones.py` et `zones_s10.py`
+ne sont pas touchés (demandé explicitement) — `zones_s10.py` n'existe même
+pas dans ce dépôt (une copie locale de Mohamed sur le Jetson, jamais
+committée) : `seuils.py` ne peut donc pas en dépendre et n'en a pas besoin,
+il prend ses propres seuils en argument (`--seuils`, défaut
+`10,15,18,20,25` — couvre les deux seuils déjà testés sur le terrain, 10 et
+25, plus trois valeurs intermédiaires).
+
+**Règle « marche » commune, redéfinie ici en dur (40 %).** Le seuil minute
+de `machine_etat/detecter_marche_arret.py` (`SEUIL_MINUTE_POURCENT`) n'est
+pas importé depuis `machine_etat/` : `outils_zones/` est un dossier
+d'outils locaux volontairement indépendant de la production (voir son
+_commun.py), et `seuils.py` n'a de toute façon besoin que de la valeur, pas
+du module entier. Donnée explicitement dans la tâche, donc dupliquée en
+une constante plutôt qu'importée.
+
+**État attendu optionnel par instant, pas une liste séparée.** `DATE HEURE
+[ETAT]` sur la ligne de commande : si `ETAT` ('marche' ou 'arret') est omis,
+l'instant est mesuré et affiché mais exclu des verdicts (on ne sait pas
+contre quoi comparer) — utile pour ajouter un point de mesure exploratoire
+sans devoir connaître son état à l'avance. Le jeton qui suit DATE+HEURE est
+reconnu comme ETAT seulement s'il vaut exactement « marche » ou « arret » ;
+sinon il est traité comme la DATE de l'instant suivant.
+
+**Lecture/calcul VS affichage séparés.** Toute la lecture DVR remplit un
+dict `{instant: {zone: {seuil: [fractions par seconde]}}}` d'abord ;
+`construire_rapport()` ne touche plus au réseau, bâtit le texte final, et
+est testée avec des données synthétiques (pas de DVR) — voir les tests.
+
+**Sélection du meilleur couple : nombre de bons d'abord, marge ensuite.**
+Comparaison par tuple `(nb_correct, marge)` : Python compare d'abord
+`nb_correct`, puis `marge` à égalité — exactement l'ordre de priorité
+demandé. `marge = min(valeurs des instants "marche") - max(valeurs des
+instants "arret")` : positive et grande = bonne séparation ; négative =
+chevauchement (au moins un faux, donc `nb_correct` ne peut pas être
+maximal dans ce cas). Un couple sans au moins un instant « marche » ET un
+instant « arret » lus avec succès est exclu du choix (rien à départager).
+
+**Progression affichée, mais le fichier `seuils.txt` ne l'est qu'à la
+fin.** Le tableau final nécessite TOUS les instants (comparaison entre eux
+pour le meilleur couple) : impossible à écrire progressivement sans le
+refaire à chaque instant. En revanche, chaque instant imprime sa progression
+sur stdout (`[i/7] ... lu : N seconde(s)`, avec `flush=True`) : lancé via
+`nohup ... > seuils.log`, ce journal reste lisible à tout moment même si
+l'exécution est interrompue — seul `seuils.txt` (le tableau final propre)
+manquerait dans ce cas, pas la trace de ce qui a été mesuré.
+
+**Format narrow (lisible sur téléphone).** Un bloc par (zone, seuil), pas un
+grand tableau large : chaque ligne fait `MM-JJ HH:MM  etat    XX.X%` (~30
+caractères), avec `<- FAUX` en fin de ligne pour les instants mal classés —
+repérables sans faire défiler horizontalement.
+
+## Commandes pour Mohamed (une ligne chacune, depuis Termux/SSH)
+
+Lancer en arrière-plan (dure environ 15 min, 7 instants par défaut) :
+
+    cd ~/suivi-de-machine && mkdir -p outils_zones/sorties && nohup .venv/bin/python3 outils_zones/seuils.py > outils_zones/sorties/seuils.log 2>&1 &
+
+Consulter la progression ou le résultat (à tout moment, même en cours) :
+
+    cat outils_zones/sorties/seuils.log
+
+Une fois terminé (ligne `Tableau ecrit dans ...` visible dans le journal),
+le tableau final propre (sans les lignes de progression) est aussi dans :
+
+    cat outils_zones/sorties/seuils.txt
+
+## Vérifications
+
+- `python3 -m unittest outils_zones.test_outils_zones -v` : **15/15** (9
+  précédents + 6 nouveaux). Nouveaux : bruit d'amplitude 15 compté au seuil
+  10 mais pas au seuil 25 (reproduit le constat terrain sur des données
+  synthétiques), vrai mouvement net détecté à tous les seuils, calcul du %
+  de secondes en mouvement et du verdict marche/arrêt (limite exacte à
+  40 %), analyse des jetons `DATE HEURE [ETAT]` (état optionnel, erreur
+  claire sur argument incomplet), sélection du meilleur couple zone+seuil
+  sur un cas où un seuil sépare parfaitement et l'autre se trompe, rapport
+  qui n'échoue pas sur un instant non lu.
+- `py_compile` sans erreur sur `seuils.py` et le fichier de test.
+- `--help` et la validation `--zones` (erreur propre sur un nom de zone
+  inconnu, sans toucher au réseau) vérifiés directement.
+- **Non vérifié ici** (aucun accès DVR/Jetson) : lecture réelle du flux sur
+  les 7 instants, et donc le vrai meilleur couple zone+seuil en conditions
+  réelles. À lancer par Mohamed avec les commandes ci-dessus.

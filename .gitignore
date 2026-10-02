@@ -46,8 +46,9 @@ machine_etat/file_attente/
 # au prochain git pull).
 machine_etat/curseur.json
 
-# Images produites par outils_zones/ (zones.py, zoom.py, quadrillage.py) :
+# Sorties de outils_zones/ (zones.py, zoom.py, quadrillage.py, seuils.py) :
 # regenerees a la demande depuis le DVR, propres a chaque test, jamais
-# commitees.
+# commitees (tout outils_zones/sorties/, y compris le journal nohup
+# seuils.log).
 outils_zones/sorties/
 __pycache__/

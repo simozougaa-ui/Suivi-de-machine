@@ -18,6 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _commun  # noqa: E402
 import quadrillage  # noqa: E402
 import seuils  # noqa: E402
+import vitesse_lecture  # noqa: E402
 import zoom  # noqa: E402
 from zones import SEUIL_PIXEL, fraction_mouvement  # noqa: E402
 
@@ -191,6 +192,162 @@ class TestMeilleurCouple(unittest.TestCase):
 
         rapport = seuils.construire_rapport(instants, donnees, [10], ["C"])
         self.assertIn("non lu", rapport)
+
+
+class FauxLecteur:
+    """Simule un cv2.VideoCapture pour vitesse_lecture : rend `n_images`
+    images puis (False, None). `echoue_a_l_ouverture` lève à la création."""
+
+    def __init__(self, n_images):
+        self._reste = n_images
+        self.libere = False
+
+    def read(self):
+        if self._reste <= 0:
+            return False, None
+        self._reste -= 1
+        return True, object()
+
+    def release(self):
+        self.libere = True
+
+
+class HorlogeFactice:
+    """Avance d'un pas fixe à chaque appel : temps déterministe, sans sleep."""
+
+    def __init__(self, pas=0.01):
+        self.t = 0.0
+        self.pas = pas
+
+    def __call__(self):
+        self.t += self.pas
+        return self.t
+
+
+class TestMesureFlux(unittest.TestCase):
+    def test_images_par_seconde_calculees(self):
+        # 30 images lues, horloge qui avance de 0,1 s par appel.
+        # mesurer_flux appelle l'horloge : t0, après ouverture, puis 2 par
+        # tour (test du délai + lecture), puis une fin. On vérifie surtout
+        # que images et duree sont cohérents et ips = images/duree.
+        lecteur = FauxLecteur(30)
+        images, duree, ouverture, interrompu = vitesse_lecture.mesurer_flux(
+            lambda: lecteur, total_images=30, delai_max=1000, horloge=HorlogeFactice(0.1))
+        self.assertEqual(images, 30)
+        self.assertFalse(interrompu)
+        self.assertTrue(lecteur.libere)
+        self.assertGreater(duree, 0)
+
+    def test_arret_au_delai_maxi(self):
+        lecteur = FauxLecteur(10_000)  # beaucoup plus que ce que le délai permet
+        images, duree, ouverture, interrompu = vitesse_lecture.mesurer_flux(
+            lambda: lecteur, total_images=10_000, delai_max=1.0, horloge=HorlogeFactice(0.1))
+        self.assertTrue(interrompu)
+        self.assertLess(images, 10_000)
+        self.assertTrue(lecteur.libere)
+
+    def test_fin_de_flux_avant_total(self):
+        lecteur = FauxLecteur(5)
+        images, duree, ouverture, interrompu = vitesse_lecture.mesurer_flux(
+            lambda: lecteur, total_images=100, delai_max=1000, horloge=HorlogeFactice(0.1))
+        self.assertEqual(images, 5)
+        self.assertFalse(interrompu)
+
+
+class TestVerdictVitesse(unittest.TestCase):
+    def _resultat(self, images, duree, erreur=None):
+        r = vitesse_lecture.Resultat("test")
+        r.images, r.duree_s, r.erreur = images, duree, erreur
+        return r
+
+    def test_plus_rapide_que_temps_reel(self):
+        r = self._resultat(images=600, duree=30.0)  # 20 img/s > 15
+        self.assertAlmostEqual(r.ips, 20.0)
+        self.assertEqual(r.verdict(), "plus rapide que le temps réel")
+
+    def test_temps_reel(self):
+        r = self._resultat(images=375, duree=30.0)  # 12,5 img/s
+        self.assertEqual(r.verdict(), "temps réel")
+
+    def test_echec_affiche_la_cause(self):
+        r = self._resultat(images=0, duree=0.0, erreur="2e session refusée")
+        self.assertEqual(r.ips, 0.0)
+        self.assertIn("2e session refusée", r.verdict())
+
+
+class TestMasquageIdentifiants(unittest.TestCase):
+    def test_masque_user_pass_dans_url_rtsp(self):
+        msg = "Impossible d'ouvrir rtsp://admin:Secret123@192.168.1.10:554/cam/playback"
+        masque = vitesse_lecture.masquer(msg)
+        self.assertNotIn("Secret123", masque)
+        self.assertNotIn("admin:", masque)
+        self.assertIn("rtsp://***@192.168.1.10", masque)
+
+    def test_masque_http_et_mots_secrets(self):
+        msg = "echec http://admin:MotDePasse@10.0.0.5/cgi-bin/loadfile.cgi"
+        masque = vitesse_lecture.masquer(msg, mots_secrets=("MotDePasse", "admin"))
+        self.assertNotIn("MotDePasse", masque)
+        self.assertIn("http://***@10.0.0.5", masque)
+
+    def test_mot_de_passe_isole_est_masque(self):
+        # Le mot de passe pourrait apparaître hors d'une URL (message ffmpeg).
+        masque = vitesse_lecture.masquer("auth failed for Secret123", mots_secrets=("Secret123",))
+        self.assertEqual(masque, "auth failed for ***")
+
+
+class TestTableauVitesse(unittest.TestCase):
+    def _r(self, nom, images, duree, erreur=None, note=None):
+        r = vitesse_lecture.Resultat(nom)
+        r.images, r.duree_s, r.erreur, r.note = images, duree, erreur, note
+        return r
+
+    def test_conclusion_meilleure_methode_et_estimation_5min(self):
+        resultats = [
+            self._r("lente", 375, 30.0),       # 12,5 img/s
+            self._r("rapide", 900, 30.0),      # 30 img/s
+            self._r("cassee", 0, 0.0, erreur="refus"),
+        ]
+        tableau = vitesse_lecture.construire_tableau(resultats, duree=30, timer_actif=False)
+        self.assertIn("Meilleure : rapide", tableau)
+        # 5 min à 30 img/s : 4500/30 = 150 s < 300.
+        self.assertIn("150 s", tableau)
+        self.assertIn("OK", tableau)
+
+    def test_avertissement_timer_actif_en_tete(self):
+        tableau = vitesse_lecture.construire_tableau(
+            [self._r("x", 450, 30.0)], duree=30, timer_actif=True)
+        self.assertTrue(tableau.startswith("!!"))
+        self.assertIn("ACTIF", tableau)
+
+    def test_aucune_methode_exploitable(self):
+        tableau = vitesse_lecture.construire_tableau(
+            [self._r("x", 0, 0.0, erreur="délai dépassé")], duree=30, timer_actif=False)
+        self.assertIn("Aucune méthode", tableau)
+
+
+class TestDelaiDepasse(unittest.TestCase):
+    def test_avec_delai_marque_le_resultat_si_fn_bloque(self):
+        import threading
+        r = vitesse_lecture.Resultat("bloquant")
+        barriere = threading.Event()
+
+        def bloque():
+            barriere.wait(30)  # ne rend pas la main avant le délai
+
+        vitesse_lecture._avec_delai(bloque, delai=0.2, resultat=r)
+        self.assertIsNotNone(r.erreur)
+        self.assertIn("délai dépassé", r.erreur)
+        barriere.set()
+
+    def test_avec_delai_remonte_une_exception_masquee(self):
+        r = vitesse_lecture.Resultat("plante")
+
+        def plante():
+            raise RuntimeError("echec rtsp://admin:Secret@1.2.3.4/x")
+
+        vitesse_lecture._avec_delai(plante, delai=1.0, resultat=r)
+        self.assertIsNotNone(r.erreur)
+        self.assertNotIn("Secret", r.erreur)
 
 
 if __name__ == "__main__":

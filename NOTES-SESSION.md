@@ -2330,3 +2330,92 @@ journaux) :
   fonctionnement dans ce conteneur) : le déclenchement réel à 8 h, la
   relance effective du timer de détection après un échec, et le fuseau du
   Jetson (commande (d)).
+
+---
+
+# Mesure de la vitesse de lecture du DVR (2026-10-04)
+
+## Problème
+
+Le journal de production montre que la relecture RTSP est parfois trop
+lente : « Lecture : 4500 images en 357,8 s pour 300 s de vidéo (ouverture
+du flux + 1re image : 2.6 s) » sur 7 passages entre 19h02 et 19h38 le
+03/10, soit ~12,6 img/s au lieu de 15 — un passage de 5 min de vidéo dure
+~6 min, le retard grandit de ~1 min/passage (~10 min/h). À 18h20 le même
+passage durait 300,9 s (15 img/s) : la vitesse varie, cause inconnue. La
+remise à jour automatique de 8 h (suivi-machine-rattrapage.timer) reste en
+place comme filet de sécurité mais ne résout pas ce retard de fond.
+
+Claude Code n'a pas accès au DVR ni au Jetson : `outils_zones/vitesse_lecture.py`
+est un outil que le propriétaire lance lui-même pour mesurer d'où vient la
+lenteur et quelle méthode serait plus rapide.
+
+## Ce que fait l'outil
+
+Mesure, sur une durée courte (défaut 30 s de vidéo, option `--duree`),
+plusieurs façons de lire le DVR, chacune indépendante et avec un délai
+maximal (défaut 90 s, `--delai-max`) pour qu'une lecture bloquée ne gèle
+pas l'outil :
+
+- **a. référence** : la lecture EXACTE de la production (même URL, mêmes
+  identifiants .env, même `open_stream`), sur une fenêtre ancienne (~2 h)
+  puis récente (~7 min avant maintenant) — pour voir si la vitesse dépend
+  de l'ancienneté de l'enregistrement.
+- **b. transport forcé** : RTSP sur TCP puis sur UDP
+  (`OPENCV_FFMPEG_CAPTURE_OPTIONS=rtsp_transport;tcp|udp`, la valeur
+  appliquée est notée dans la sortie).
+- **c. deux lectures parallèles** : deux sessions RTSP simultanées sur les
+  deux moitiés de la fenêtre ; détecte si le DVR refuse la 2e session.
+- **d. téléchargement HTTP** : fichier via `loadfile.cgi` du DVR Dahua, en
+  auth digest (jamais d'identifiants dans l'URL) ; échec propre si l'API
+  n'existe pas.
+- **e. relecture accélérée (Scale)** : signalée non supportée via OpenCV
+  (ffmpeg n'expose pas l'en-tête Scale RTSP), sans bloquer les autres.
+
+Sortie étroite (téléphone), progression méthode par méthode (résultat
+partiel visible si interruption), tableau final avec img/s et verdict par
+méthode, conclusion (meilleure méthode + temps estimé pour 5 min), écrite
+aussi dans `outils_zones/sorties/vitesse_lecture.txt`. `--repetitions`
+répète pour voir la variabilité.
+
+## Choix techniques (autonomes)
+
+- **Identifiants jamais affichés** : `masquer()` retire la partie
+  `user:pass@` de toute URL rtsp/http et remplace en plus le mot de passe
+  et l'utilisateur .env partout où ils pourraient apparaître (messages
+  ffmpeg). Appliqué à tous les messages d'erreur. Testé.
+- **Cœur mesurable isolé** : `mesurer_flux()` prend un ouvreur de flux et
+  une horloge injectables → testé avec un faux lecteur, sans DVR (calcul
+  img/s, arrêt au délai, fin de flux avant le total).
+- **Délai par méthode** : chaque méthode tourne dans un thread démon
+  (`_avec_delai`) ; si une lecture C reste bloquée dans ffmpeg, le résultat
+  est marqué « délai dépassé » et les méthodes suivantes continuent.
+- **N'arrête PAS le timer lui-même** : détecte seulement
+  `systemctl is-active suivi-machine-etat.service` et avertit en tête de
+  sortie et dans le tableau (l'arrêt reste une décision de
+  l'administrateur, voir commandes). Le port HTTP du DVR est lu dans
+  `DVR_HTTP_PORT` (défaut 80) sans rien ajouter d'obligatoire au .env.
+
+## Commandes (une ligne chacune, depuis Termux/SSH)
+
+(a) Procédure complète : arrêter le timer, mesurer, relancer le timer. Le
+passage coupé n'est pas perdu (le curseur n'avance qu'après un envoi
+réussi, il sera simplement refait) :
+
+    cd ~/suivi-de-machine && git pull origin main && sudo systemctl stop suivi-machine-etat.timer suivi-machine-etat.service && .venv/bin/python3 outils_zones/vitesse_lecture.py --repetitions 2; sudo systemctl start suivi-machine-etat.timer
+
+(b) Revoir le tableau final :
+
+    cat outils_zones/sorties/vitesse_lecture.txt
+
+## Vérifications
+
+- `python3 -m unittest outils_zones.test_outils_zones` : 29/29 (15
+  précédents + 14 nouveaux : calcul img/s, arrêt au délai, fin de flux,
+  verdicts, masquage des identifiants — URL rtsp/http et mots isolés —,
+  conclusion et estimation 5 min, avertissement timer actif, délai dépassé
+  qui marque le résultat, exception masquée).
+- `python3 -m unittest machine_etat.test_detecter_marche_arret` : 47/47
+  inchangés. Rien modifié dans machine_etat/ ni deploy/.
+- **Non vérifié ici** (aucun accès DVR/Jetson) : les mesures réelles. À
+  lancer par le propriétaire avec la commande (a).

@@ -75,13 +75,18 @@ Usage (production, via systemd timer toutes les 5 minutes) :
 Usage (rattrapage ou vérification d'une plage passée, les DEUX machines) :
     python3 machine_etat/detecter_marche_arret.py \
         --date 2026-09-28 --debut 17:24 --fin 18:07
+
+Usage (repartir à jour après un gros retard, timer ARRÊTÉ, sans sudo) :
+    python3 machine_etat/detecter_marche_arret.py --repartir-a-jour
 """
 
 import argparse
+import fcntl
 import json
 import logging
 import os
 import sys
+import tempfile
 import time
 from datetime import datetime, timedelta
 
@@ -145,33 +150,70 @@ FICHIER_CURSEUR = os.path.join(ROOT, "machine_etat", "curseur.json")
 # tout son travail au lieu d'avancer d'un cran sûr.
 PLAFOND_RATTRAPAGE_MINUTES = FENETRE_MINUTES
 
+# Verrou de passage (2026-10-03) : pris par tout passage AUTOMATIQUE et par
+# --repartir-a-jour, les deux seuls à écrire les curseurs. flock() est libéré
+# par le noyau dès que le processus meurt (même tué par systemd) : pas de
+# verrou « fantôme » à nettoyer à la main, contrairement à un fichier PID.
+FICHIER_VERROU = os.path.join(ROOT, "machine_etat", "passage.lock")
+
+FORMAT_CURSEUR = "%Y-%m-%dT%H:%M"
+
+
+def _maintenant():
+    return datetime.now()
+
+
+def _lire_curseurs():
+    """Contenu de curseur.json sous la forme {machine_id: "AAAA-MM-JJTHH:MM"}.
+    L'ancien format mono-machine ({"derniere_fin_analysee": ...}, avant la
+    machine 2) ne pouvait concerner que machine-1, seule machine suivie alors."""
+    try:
+        with open(FICHIER_CURSEUR, encoding="utf-8") as f:
+            donnees = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+    if "derniere_fin_analysee" in donnees:
+        return {"machine-1": donnees["derniere_fin_analysee"]}
+    return donnees
+
+
+def _ecrire_curseurs(donnees):
+    """Écriture ATOMIQUE de curseur.json : fichier temporaire dans le même
+    dossier, fsync, puis os.replace(). Un passage tué en pleine écriture
+    (TimeoutStartSec, coupure de courant) laisse l'ancien fichier intact,
+    jamais un fichier tronqué que lire_curseur() lirait comme « aucun
+    curseur » — ce qui ferait repartir de [T-10, T-5] en sautant le retard."""
+    dossier = os.path.dirname(FICHIER_CURSEUR)
+    os.makedirs(dossier, exist_ok=True)
+    fd, chemin_tmp = tempfile.mkstemp(dir=dossier, prefix=".curseur.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(donnees, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(chemin_tmp, 0o644)
+        os.replace(chemin_tmp, FICHIER_CURSEUR)
+    except BaseException:
+        try:
+            os.remove(chemin_tmp)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def _valeur_curseur(texte):
+    try:
+        return datetime.strptime(texte, FORMAT_CURSEUR)
+    except (TypeError, ValueError):
+        return None
+
 
 def lire_curseur(machine_id):
     """Fin de la dernière fenêtre traitée avec succès pour `machine_id`, ou
     None si cette machine n'a jamais de progression connue (jamais lancée,
     fichier absent/illisible, ou ancienne entrée mono-machine qui ne la
     concerne pas)."""
-    try:
-        with open(FICHIER_CURSEUR, encoding="utf-8") as f:
-            donnees = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return None
-
-    if "derniere_fin_analysee" in donnees:
-        # Ancien format (avant la machine 2) : une seule valeur, qui ne
-        # pouvait concerner que machine-1 (seule machine suivie alors).
-        if machine_id != "machine-1":
-            return None
-        valeur = donnees["derniere_fin_analysee"]
-    else:
-        valeur = donnees.get(machine_id)
-        if valeur is None:
-            return None
-
-    try:
-        return datetime.strptime(valeur, "%Y-%m-%dT%H:%M")
-    except ValueError:
-        return None
+    return _valeur_curseur(_lire_curseurs().get(machine_id))
 
 
 def ecrire_curseur(machine_id, fin):
@@ -183,26 +225,64 @@ def ecrire_curseur(machine_id, fin):
     retard), un appel ecrire_curseur("machine-1", fin) ne doit surtout pas
     faire reculer son curseur déjà plus avancé.
     """
+    donnees = _lire_curseurs()
+    actuelle = _valeur_curseur(donnees.get(machine_id))
+    if actuelle is not None and actuelle >= fin:
+        return
+    donnees[machine_id] = fin.strftime(FORMAT_CURSEUR)
+    _ecrire_curseurs(donnees)
+
+
+def repartir_a_jour(machines, maintenant=None):
+    """Place le curseur de chaque machine de `machines` à l'heure actuelle
+    moins RETARD_MINUTES, arrondie à la minute inférieure — la même borne
+    que `fin_securisee` dans fenetre_a_analyser — en UNE écriture atomique.
+
+    N'analyse rien et n'envoie rien : les minutes entre l'ancien curseur et
+    cette heure restent absentes de l'application (« non mesuré » sur la
+    frise), aucune valeur n'est inventée pour elles. Un curseur déjà plus
+    avancé n'est pas reculé (même règle que ecrire_curseur). Retourne
+    l'heure cible."""
+    t = (maintenant or _maintenant()).replace(second=0, microsecond=0)
+    cible = t - timedelta(minutes=RETARD_MINUTES)
+    donnees = _lire_curseurs()
+    for machine_id in machines:
+        actuelle = _valeur_curseur(donnees.get(machine_id))
+        if actuelle is None or actuelle < cible:
+            donnees[machine_id] = cible.strftime(FORMAT_CURSEUR)
+    _ecrire_curseurs(donnees)
+    return cible
+
+
+def prendre_verrou():
+    """Verrou exclusif non bloquant sur FICHIER_VERROU. Retourne le fichier
+    ouvert (à garder ouvert jusqu'à la fin du processus), ou None si un autre
+    processus le détient déjà. Ouvert en lecture seule : un verrou flock n'a
+    pas besoin du droit d'écriture, donc un fichier passage.lock créé par
+    erreur sous un autre utilisateur ne bloque pas le service."""
+    os.makedirs(os.path.dirname(FICHIER_VERROU), exist_ok=True)
+    fd = os.open(FICHIER_VERROU, os.O_RDONLY | os.O_CREAT, 0o644)
     try:
-        with open(FICHIER_CURSEUR, encoding="utf-8") as f:
-            donnees = json.load(f)
-        if "derniere_fin_analysee" in donnees:
-            donnees = {"machine-1": donnees["derniere_fin_analysee"]}
-    except (FileNotFoundError, json.JSONDecodeError):
-        donnees = {}
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        return None
+    return fd
 
-    actuelle = donnees.get(machine_id)
-    if actuelle is not None:
-        try:
-            if datetime.strptime(actuelle, "%Y-%m-%dT%H:%M") >= fin:
-                return
-        except ValueError:
-            pass
 
-    donnees[machine_id] = fin.strftime("%Y-%m-%dT%H:%M")
-    os.makedirs(os.path.dirname(FICHIER_CURSEUR), exist_ok=True)
-    with open(FICHIER_CURSEUR, "w", encoding="utf-8") as f:
-        json.dump(donnees, f)
+def signaler_si_trop_long(duree_passage, debut, fin):
+    """Avertit dans le journal si le passage a duré plus longtemps que la
+    vidéo qu'il a traitée : dans ce cas, le retard sur le direct grandit de
+    la différence à chaque passage. Retourne True si l'avertissement a été
+    émis."""
+    duree_fenetre = (fin - debut).total_seconds()
+    if duree_passage <= duree_fenetre:
+        return False
+    logger.warning(
+        "Passage plus long que la fenêtre traitée : %.0f s pour %.0f s de "
+        "vidéo — le retard sur le direct grandit de %.0f s.",
+        duree_passage, duree_fenetre, duree_passage - duree_fenetre)
+    return True
 
 
 def config_machine2():
@@ -294,8 +374,15 @@ def analyser_fenetre(debut, fin, garder_frames=None, calculer_machine2=True):
     if duree <= 0:
         raise ValueError("Fenêtre vide : la fin doit être après le début.")
 
-    capture = open_stream(build_rtsp_playback_url(debut, fin))
     pas = max(1, int(round(FPS_SUPPOSE)))       # une frame gardée/s (machine 1)
+    # Arrêt au compte d'images (2026-10-03) : l'image d'index `total_images`
+    # est la première APRÈS `fin`. Le DVR ne l'envoie jamais (la relecture
+    # s'arrête à endtime) mais ne ferme pas la session : la demander bloquait
+    # read() jusqu'au délai de lecture FFmpeg d'OpenCV (30 s, « Stream timeout
+    # triggered after 30xxx ms ») à chaque passage. Même modèle de temps que
+    # le reste de cette fonction (instant = debut + index / pas) : mêmes
+    # images traitées qu'avant, seule la lecture bloquée disparaît.
+    total_images = duree * pas
     par_minute_m1 = {}
     par_minute_m2 = {}
     precedente_m1 = None
@@ -306,8 +393,11 @@ def analyser_fenetre(debut, fin, garder_frames=None, calculer_machine2=True):
     if garder_frames:
         os.makedirs(garder_frames, exist_ok=True)
 
+    t_ouverture = time.monotonic()
+    t_premiere_image = None
+    capture = open_stream(build_rtsp_playback_url(debut, fin))
     try:
-        while True:
+        while index < total_images:
             if not calculer_machine2 and index % pas != 0:
                 # Machine 2 désactivée : on peut se permettre de ne décoder
                 # qu'1 image/15 (voir grab() plus bas) comme avant son ajout.
@@ -325,14 +415,14 @@ def analyser_fenetre(debut, fin, garder_frames=None, calculer_machine2=True):
             ok, frame = capture.read()
             if not ok:
                 break
+            if t_premiere_image is None:
+                t_premiere_image = time.monotonic()
 
             if calculer_machine2:
                 tampon_m2.append(gris_floute_m2(frame))
 
             if index % pas == 0:
                 instant = debut + timedelta(seconds=gardees)
-                if instant >= fin:
-                    break
                 courante_m1 = zone_grise(frame)
 
                 if garder_frames:
@@ -352,18 +442,29 @@ def analyser_fenetre(debut, fin, garder_frames=None, calculer_machine2=True):
 
             if calculer_machine2 and len(tampon_m2) == pas:
                 instant_seconde = debut + timedelta(seconds=(index // pas))
-                if instant_seconde < fin:
-                    fraction = amplitude_zone_m2(tampon_m2)
-                    minute = instant_seconde.replace(second=0, microsecond=0)
-                    avec, total = par_minute_m2.get(minute, (0, 0))
-                    if fraction > SEUIL_FRACTION_M2:
-                        avec += 1
-                    par_minute_m2[minute] = (avec, total + 1)
+                fraction = amplitude_zone_m2(tampon_m2)
+                minute = instant_seconde.replace(second=0, microsecond=0)
+                avec, total = par_minute_m2.get(minute, (0, 0))
+                if fraction > SEUIL_FRACTION_M2:
+                    avec += 1
+                par_minute_m2[minute] = (avec, total + 1)
                 tampon_m2 = []
 
             index += 1
     finally:
         capture.release()
+
+    duree_lecture = time.monotonic() - t_ouverture
+    if index < total_images:
+        logger.warning(
+            "Flux terminé avant la fin de la fenêtre : %d/%d images reçues "
+            "(moins de %d images/s envoyées par le DVR, ou coupure).",
+            index, total_images, pas)
+    attente_premiere = (t_premiere_image - t_ouverture) if t_premiere_image else float("nan")
+    logger.info(
+        "Lecture : %d images en %.1f s pour %d s de vidéo "
+        "(ouverture du flux + 1re image : %.1f s).",
+        index, duree_lecture, duree, attente_premiere)
 
     return par_minute_m1, par_minute_m2
 
@@ -489,7 +590,7 @@ def fenetre_a_analyser(machines, maintenant=None):
     nouveau n'est encore disponible (déjà à jour avec le DVR) : ne pas
     analyser une fenêtre vide ou négative.
     """
-    t = (maintenant or datetime.now()).replace(second=0, microsecond=0)
+    t = (maintenant or _maintenant()).replace(second=0, microsecond=0)
     fin_securisee = t - timedelta(minutes=RETARD_MINUTES)
 
     curseurs_connus = [c for c in (lire_curseur(m) for m in machines) if c is not None]
@@ -542,7 +643,7 @@ def traiter_envoi_machine(machine_id, lignes, fin_fenetre, url, jeton, mode_auto
     return True
 
 
-def main():
+def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--date", help="AAAA-MM-JJ (rattrapage d'une plage passée)")
@@ -552,8 +653,11 @@ def main():
                     help="écrit les frames décodées de la machine 1 (débogage seulement)")
     ap.add_argument("--sans-envoi", action="store_true",
                     help="calcule et affiche (les deux machines), n'envoie rien, n'avance aucun curseur")
+    ap.add_argument("--repartir-a-jour", action="store_true",
+                    help="place les curseurs des deux machines à maintenant - 5 min puis quitte, "
+                         "sans rien analyser ni envoyer (les minutes sautées restent « non mesurées »)")
     ap.add_argument("--verbeux", action="store_true")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbeux else logging.INFO,
@@ -568,6 +672,45 @@ def main():
     # avancer ou reculer la progression du service.
     mode_auto = not (args.date or args.debut or args.fin)
 
+    if args.repartir_a_jour:
+        if not mode_auto or args.sans_envoi:
+            ap.error("--repartir-a-jour s'utilise seul.")
+        verrou = prendre_verrou()
+        if verrou is None:
+            logger.error(
+                "Un passage est en cours (verrou %s) : rien n'a été modifié. "
+                "Arrêter d'abord le timer et le service, puis relancer.", FICHIER_VERROU)
+            return 1
+        # Les DEUX machines, même si la machine 2 est désactivée : sinon son
+        # vieux curseur ferait reculer la fenêtre partagée (minimum des
+        # curseurs) le jour où on la réactive.
+        try:
+            cible = repartir_a_jour([machine1_id, machine2_id])
+        finally:
+            os.close(verrou)
+        logger.info(
+            "Curseurs de %s et %s placés à %s : rien analysé, rien envoyé. Les "
+            "minutes sautées restent « non mesurées » dans l'application.",
+            machine1_id, machine2_id, cible.strftime("%Y-%m-%d %H:%M"))
+        return 0
+
+    t_passage = time.monotonic()
+    verrou = None
+    if mode_auto and not args.sans_envoi:
+        verrou = prendre_verrou()
+        if verrou is None:
+            logger.warning("Un autre passage est déjà en cours : celui-ci s'arrête sans rien faire.")
+            return 0
+    try:
+        return _passage(ap, args, mode_auto, machine1_id, machine2_active, machine2_id, t_passage)
+    finally:
+        if verrou is not None:
+            os.close(verrou)
+
+
+def _passage(ap, args, mode_auto, machine1_id, machine2_active, machine2_id, t_passage):
+    """Un passage complet (fenêtre, lecture, classement, envoi, curseurs),
+    appelé par main() une fois le verrou pris en mode automatique."""
     if args.date and args.debut and args.fin:
         jour = datetime.strptime(args.date, "%Y-%m-%d").date()
         debut = datetime.combine(jour, datetime.strptime(args.debut, "%H:%M").time())
@@ -611,6 +754,7 @@ def main():
             "(repris automatiquement au prochain passage).", retard_restant)
 
     if args.sans_envoi:
+        signaler_si_trop_long(time.monotonic() - t_passage, debut, fin)
         return 0
 
     url, jeton = config_api()
@@ -641,6 +785,7 @@ def main():
         ]
         reussite_m2 = traiter_envoi_machine(machine2_id, lignes_m2_a_envoyer, fin, url, jeton, mode_auto)
 
+    signaler_si_trop_long(time.monotonic() - t_passage, debut, fin)
     return 0 if (reussite_m1 and reussite_m2) else 1
 
 

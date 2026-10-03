@@ -52,3 +52,7 @@ machine_etat/curseur.json
 # seuils.log).
 outils_zones/sorties/
 __pycache__/
+# Verrou de passage et fichiers temporaires d'écriture atomique des curseurs
+# (machine_etat/detecter_marche_arret.py) : propres à chaque Jetson.
+machine_etat/passage.lock
+machine_etat/.curseur.*.tmp

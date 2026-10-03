@@ -1966,3 +1966,143 @@ le tableau final propre (sans les lignes de progression) est aussi dans :
 - **Non vérifié ici** (aucun accès DVR/Jetson) : lecture réelle du flux sur
   les 7 instants, et donc le vrai meilleur couple zone+seuil en conditions
   réelles. À lancer par Mohamed avec les commandes ci-dessus.
+
+---
+
+# Retard qui grossit : attente de 30 s en fin de lecture, remise à jour, garde-fou (2026-10-03)
+
+Constat de Mohamed (`journalctl -u suivi-machine-etat.service`) : chaque
+passage traite bien sa fenêtre de 5 min pour les deux machines, mais dure
+plus de 5 min 30 (CPU ~2 min, le reste en attente), avec à chaque fois
+l'avertissement OpenCV « Stream timeout triggered after 30xxx ms ». Le
+retard (« 9:32:00 de retard restent à rattraper ») grossit d'environ 30 s
+par passage.
+
+## Cause trouvée dans le code
+
+`analyser_fenetre()` lisait dans une boucle `while True` dont le seul test
+de fin de fenêtre (`instant >= fin`) se faisait APRÈS `capture.read()` de
+l'image n° `durée × 15`, c'est-à-dire la première image après l'heure de
+fin. Le DVR n'envoie jamais cette image (la relecture RTSP s'arrête à
+`endtime`) mais ne ferme pas la session : ce `read()` restait bloqué
+jusqu'au délai de lecture par défaut du module FFmpeg d'OpenCV (30 000 ms,
+c'est lui qui écrit « Stream timeout triggered after … ms »), puis
+renvoyait `False`. Une lecture bloquée par passage = les 30 s.
+
+## Corrections (décisions autonomes)
+
+**Arrêt au compte d'images.** La boucle s'arrête dès que `durée × 15`
+images ont été reçues (`while index < total_images`), sans jamais demander
+la suivante. Choisi plutôt que l'horodatage : `CAP_PROP_POS_MSEC` est peu
+fiable en RTSP, et le code entier utilisait déjà ce modèle de temps
+(instant = début + index / 15). C'est donc par construction la même
+dernière image que l'ancien test `instant >= fin`, et les mêmes images,
+flous, seuils, zones et minutes pour les deux machines — prouvé par un
+test qui compare le résultat à une copie figée de l'ancienne boucle. Les
+deux contrôles devenus inatteignables (`instant >= fin`,
+`instant_seconde < fin`) sont retirés. `src/camera_stream.py` n'est pas
+touché (partagé avec d'autres scripts) : pas de délai FFmpeg raccourci.
+
+**Mesure dans le journal.** Chaque passage écrit maintenant
+« Lecture : N images en X s pour 300 s de vidéo (ouverture du flux + 1re
+image : Y s) ». Si le DVR envoie moins d'images que prévu (moins de 15/s,
+coupure), un avertissement « Flux terminé avant la fin de la fenêtre :
+N/4500 images » le signale — dans ce cas seulement l'attente de 30 s peut
+encore se produire (on attend une image qui ne viendra pas), comme avant.
+
+**`--repartir-a-jour`.** Place le curseur de machine-1 ET de machine-2
+(même si la machine 2 est désactivée : sinon son vieux curseur ferait
+reculer la fenêtre partagée le jour où on la réactive) à « maintenant −
+5 min, minute inférieure », la même borne que `fin_securisee`, puis quitte
+sans rien lire ni envoyer. Les minutes sautées restent absentes de
+l'application (gris « non mesuré ») : rien n'est inventé. Un curseur déjà
+plus avancé n'est pas reculé.
+
+**Écriture atomique des curseurs.** `curseur.json` est écrit dans un
+fichier temporaire du même dossier, `fsync`, puis `os.replace()` — pour
+`--repartir-a-jour` et aussi pour les passages normaux (même fonction).
+Avant, un passage tué pendant l'écriture pouvait laisser un fichier
+tronqué, lu comme « aucun curseur » : le service serait reparti de
+[T−10, T−5] en sautant tout le retard sans le dire.
+
+**Verrou de passage.** Il n'existait aucun verrou. Ajout de
+`machine_etat/passage.lock` (gitignoré), pris en `flock` non bloquant par
+tout passage automatique qui écrit les curseurs et par
+`--repartir-a-jour`. Si `--repartir-a-jour` trouve le verrou pris, il ne
+modifie rien et sort en erreur (« arrêter d'abord le timer et le
+service ») ; un second passage automatique s'arrête sans rien faire. Un
+`flock` est libéré par le noyau dès que le processus meurt, même tué par
+systemd : pas de verrou fantôme à effacer. Les lancements manuels
+(`--date/--debut/--fin`, `--sans-envoi`) ne le prennent pas : ils
+n'écrivent aucun curseur.
+
+**Garde-fou.** Si un passage dure plus longtemps que la vidéo qu'il traite,
+le journal l'écrit : « Passage plus long que la fenêtre traitée : X s pour
+300 s de vidéo — le retard sur le direct grandit de Y s ».
+`PLAFOND_RATTRAPAGE_MINUTES` et `TimeoutStartSec=480` sont inchangés.
+
+## Est-ce que ça tient dans l'intervalle du timer ? Non, de justesse
+
+Vérification par le code : sans l'attente de 30 s, un passage = réception
+des 4 500 images + ouverture du flux + classement (millisecondes) + envoi
+des deux lots (normalement moins d'une seconde chacun). Le CPU mesuré par
+Mohamed (~2 min pour plus de 5 min 30 de durée totale) montre que ce n'est
+pas le calcul qui limite : c'est le DVR qui rejoue l'enregistrement à
+vitesse réelle. Recevoir 300 s de vidéo prend donc environ 300 s, quoi
+qu'on fasse côté code — c'est la partie incompressible.
+
+Conséquence : un passage dure environ 300 s + quelques secondes (ouverture
+du flux, envoi), donc un peu PLUS que les 300 s de l'intervalle du timer.
+La marge est négative : le retard ne grossira plus de ~30 s par passage,
+mais encore de quelques secondes (de l'ordre de 1 min par heure si
+l'ouverture + l'envoi font ~5 s), et il ne se résorbe jamais tout seul. Un
+passage reste très loin de `TimeoutStartSec=480` (pas de risque d'être tué).
+Le rattrapage d'un gros retard est impossible en relisant le DVR à vitesse
+réelle, d'où `--repartir-a-jour` pour repartir de maintenant.
+
+**Mesure à faire sur le Jetson** : après un passage, lire la ligne
+« Lecture : 4500 images en X s … (ouverture du flux + 1re image : Y s) »
+et l'éventuel avertissement du garde-fou. X ≈ 300 confirme la relecture à
+vitesse réelle ; X + temps d'envoi − 300 donne la dérive par passage.
+
+Pistes si la dérive gêne (non faites ici) : relancer `--repartir-a-jour`
+de temps en temps ; ou lire deux fenêtres en parallèle (deux sessions de
+relecture DVR) quand il y a du retard. La relecture accélérée de Dahua
+(en-tête RTSP `Scale`) n'est pas accessible via OpenCV.
+
+## Commandes (une ligne chacune, depuis Termux/SSH, SANS sudo pour Python)
+
+(a) Arrêter le timer, repartir à jour, relancer le timer :
+
+    cd ~/suivi-de-machine && sudo systemctl stop suivi-machine-etat.timer suivi-machine-etat.service && .venv/bin/python3 machine_etat/detecter_marche_arret.py --repartir-a-jour; sudo systemctl start suivi-machine-etat.timer
+
+Le `;` avant le dernier `start` relance le timer même si la remise à jour
+échoue (la production reprend alors simplement avec l'ancien curseur). Ne
+pas lancer la commande Python avec `sudo` : `curseur.json` deviendrait la
+propriété de root et le service (utilisateur mbelkhayat) ne pourrait plus
+l'écrire.
+
+(b) Les 15 dernières lignes du journal du service :
+
+    sudo journalctl -u suivi-machine-etat.service -n 15 --no-pager
+
+## Vérifications
+
+- `python3 -m unittest machine_etat.test_detecter_marche_arret` : 34/34
+  (21 précédents, dont un mis à jour : il comptait l'appel `read()` en trop
+  en fin de flux — celui qui attendait 30 s — et 13 nouveaux). Nouveaux :
+  la lecture s'arrête à la dernière image de la fenêtre (une fausse capture
+  échoue si on lui demande une image de plus), dans les deux modes ; preuve
+  que l'ancienne boucle demandait bien cette image ; machines 1 et 2
+  identiques avant/après (copie figée de l'ancienne boucle, valeurs
+  attendues explicites) ; flux trop court signalé ;
+  `--repartir-a-jour` place les deux curseurs sans rien lire ni envoyer,
+  y compris machine 2 désactivée, sans reculer un curseur plus avancé, et
+  refuse si un passage tient le verrou ; le passage suivant repart de la
+  cible et n'envoie aucune minute du trou ; échec d'écriture du curseur
+  sans fichier tronqué ni temporaire résiduel ; garde-fou de durée.
+- `python3 -m unittest outils_zones.test_outils_zones` : OK, `outils_zones/`
+  non modifié (seuils.py tourne en ce moment).
+- **Non vérifié ici** (aucun accès DVR/Jetson) : la durée réelle d'un
+  passage sans l'attente de 30 s, et donc la dérive restante. Voir
+  « Mesure à faire sur le Jetson ».

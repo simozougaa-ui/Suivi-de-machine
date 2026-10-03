@@ -29,7 +29,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import detecter_marche_arret as dma  # noqa: E402
 from detecter_marche_arret import (  # noqa: E402
     FENETRE_MINUTES, PLAFOND_RATTRAPAGE_MINUTES, RETARD_MINUTES, SEUIL_FRACTION,
-    SEUIL_FRACTION_M2, SEUIL_PIXEL, ZONE, ZONE_M2, amplitude_zone_m2, classer,
+    SEUIL_AMPLITUDE_M2, SEUIL_FRACTION_M2, SEUIL_MINUTE_POURCENT, SEUIL_PIXEL,
+    ZONE, ZONE_M2, amplitude_zone_m2, classer,
     ecrire_curseur, fenetre_a_analyser, gris_floute_m2, lire_curseur,
     seconde_avec_mouvement, zone_grise,
 )
@@ -211,7 +212,7 @@ def _groupe_mouvement_m2():
 
 def _groupe_arret_m2(graine):
     """15 images (1 seconde) avec seulement un bruit léger dans ZONE_M2 :
-    amplitude sous SEUIL_AMPLITUDE_M2 (±3, amplitude max 6 < 10)."""
+    amplitude sous SEUIL_AMPLITUDE_M2 (±3, amplitude max 6 < 25)."""
     rng = np.random.default_rng(graine)
     x1, y1, x2, y2 = ZONE_M2
     images = []
@@ -224,7 +225,7 @@ def _groupe_arret_m2(graine):
 
 
 class TestMachine2PleineCadence(unittest.TestCase):
-    """Machine 2 (zone C, méthode pleine cadence validée via
+    """Machine 2 (zone D, méthode pleine cadence validée via
     outils_zones/zones.py) : amplitude_zone_m2 + classer() doivent classer
     correctement une minute de marche et une minute d'arrêt."""
 
@@ -750,6 +751,72 @@ class TestGardeFouDuree(unittest.TestCase):
 
     def test_silencieux_si_le_passage_tient_dans_la_fenetre(self):
         self.assertFalse(dma.signaler_si_trop_long(290.0, self.debut, self.fin))
+
+
+# --- Réglage machine 2 du 2026-10-04 : zone D, seuil d'amplitude 25 ----------
+
+def _groupe_scintillement_m2(amplitude=15):
+    """15 images (1 seconde) où TOUTE la zone de la machine 2 oscille de
+    `amplitude` niveaux de gris (100 / 100+amplitude) : le scintillement de
+    luminosité de la caméra le soir et la nuit, uniforme sur la zone, donc
+    pas effacé par le flou 5x5 — c'est lui que l'ancien seuil 10 prenait
+    pour du mouvement."""
+    x1, y1, x2, y2 = ZONE_M2
+    images = []
+    for i in range(15):
+        frame = np.full((HAUTEUR, LARGEUR, 3), GRIS_FOND, dtype=np.uint8)
+        frame[y1:y2, x1:x2] = GRIS_FOND if i % 2 == 0 else GRIS_FOND + amplitude
+        images.append(frame)
+    return images
+
+
+class TestReglageMachine2ZoneDSeuil25(unittest.TestCase):
+    """Le bruit du soir (amplitude 15) n'est plus du mouvement pour la
+    machine 2, une vraie variation forte dans la zone D l'est toujours, et la
+    machine 1 n'a pas bougé."""
+
+    def test_zone_d_et_seuil_25(self):
+        self.assertEqual(ZONE_M2, (233, 94, 289, 118))
+        self.assertEqual(SEUIL_AMPLITUDE_M2, 25)
+        self.assertEqual(SEUIL_FRACTION_M2, 0.05)
+        self.assertEqual(SEUIL_MINUTE_POURCENT, 40.0)
+        # Valeur par défaut réellement utilisée par la production (liée à la
+        # définition de la fonction, pas seulement à la constante).
+        self.assertEqual(amplitude_zone_m2.__defaults__, ((233, 94, 289, 118), 25))
+
+    def test_constantes_machine1_inchangees(self):
+        self.assertEqual(ZONE, (320, 200, 400, 240))
+        self.assertEqual(SEUIL_PIXEL, 12)
+        self.assertEqual(SEUIL_FRACTION, 0.015)
+
+    def test_bruit_15_compte_avec_l_ancien_seuil_10_mais_plus_avec_25(self):
+        images = [gris_floute_m2(f) for f in _groupe_scintillement_m2(15)]
+        self.assertGreater(amplitude_zone_m2(images, seuil=10), SEUIL_FRACTION_M2,
+                           "ce bruit doit tromper l'ancien seuil, sinon le test ne prouve rien")
+        self.assertEqual(amplitude_zone_m2(images), 0.0)
+
+    def _minute_m2(self, groupe, secondes=31):
+        """Pipeline réel (analyser_fenetre + classer) sur `secondes` secondes
+        identiques ; 31 s suffisent pour dépasser le minimum de 30 s lues."""
+        frames = [img for _ in range(secondes) for img in groupe]
+        debut = datetime(2026, 10, 1, 20, 31, 0)
+        with mock.patch.object(dma, "open_stream", return_value=FakeCapture(frames)), \
+                mock.patch.object(dma, "build_rtsp_playback_url", return_value="rtsp://factice"):
+            _, par_minute_m2 = dma.analyser_fenetre(
+                debut, debut + timedelta(seconds=secondes), calculer_machine2=True)
+        return classer(par_minute_m2)
+
+    def test_minute_de_bruit_15_classee_arret(self):
+        lignes = self._minute_m2(_groupe_scintillement_m2(15))
+        self.assertEqual(len(lignes), 1)
+        self.assertEqual(lignes[0]["etat"], "arret")
+        self.assertEqual(lignes[0]["pourcentage"], 0.0)
+
+    def test_variation_forte_dans_la_zone_d_classee_marche(self):
+        lignes = self._minute_m2(_groupe_mouvement_m2())
+        self.assertEqual(len(lignes), 1)
+        self.assertEqual(lignes[0]["etat"], "marche")
+        self.assertEqual(lignes[0]["pourcentage"], 100.0)
 
 
 if __name__ == "__main__":

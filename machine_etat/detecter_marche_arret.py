@@ -31,10 +31,11 @@ voir NOTES-SESSION.md) : constantes isolées en haut de ce fichier, et le
 journal affiche le % de secondes en mouvement de chaque minute pour
 pouvoir les réajuster sans deviner.
 
-    zone            x1=233, y1=91, x2=250, y2=121
+    zone            x1=233, y1=94, x2=289, y2=118  (zone D, depuis le 2026-10-04)
     flou            GaussianBlur 5x5, même ordre (gris -> flou -> découpage)
                      que la machine 1, même raison (artefacts de bord)
-    seuil amplitude 10
+    seuil amplitude 25  (10 avant le 2026-10-04 : le bruit du soir/de la nuit
+                         passait pour du mouvement)
     seuil fraction  0.05
 
 SEUIL_MINUTE_POURCENT (40 %) est COMMUN aux deux machines.
@@ -109,13 +110,29 @@ ZONE = (320, 200, 400, 240)          # x1, y1, x2, y2 sur une frame 1280x720
 SEUIL_PIXEL = 12
 SEUIL_FRACTION = 0.015
 
-# --- Machine 2 : valeurs validées via outils_zones/zones.py (2026-10-01 ter) -
-# Marge faible la nuit (55 % de secondes en mouvement mesurées en marche de
-# nuit, contre 10 % à l'arrêt) : seuils isolés ici, modifiables sans toucher
-# au reste du script si les mesures de Mohamed évoluent.
-ZONE_M2 = (233, 91, 250, 121)
+# --- Machine 2 : zone D, seuil d'amplitude 25 (2026-10-04) ------------------
+# Avant : zone C (233, 91, 250, 121), seuil 10. Le bruit de la caméra le soir
+# et la nuit passait pour du mouvement : « marche » presque toute la nuit du
+# 03/10, et encore « marche » (90-100 % de secondes en mouvement) après
+# l'arrêt réel de 20:30 le 01/10.
+#
+# Mesures de référence (outils_zones/seuils.py, même méthode que ce script,
+# 60 s par instant, % de secondes en mouvement), zone D, seuil 25 :
+#   marche  30/09 10:38  94,8 %      arrêt  01/10 14:45   1,8 %
+#   marche  01/10 20:20 100,0 %      arrêt  01/10 20:31   0,0 %
+#                                    arrêt  01/10 20:50   8,5 %
+#                                    arrêt  01/10 21:10   1,7 %
+#                                    arrêt  01/10 03:56   5,1 %  (confirmé)
+# Les 7 instants sont bien classés avec la règle des 40 %, et aucun autre
+# couple testé (zones C et D, seuils 10, 15, 18, 20, 25) ne fait mieux.
+#
+# LIMITE : aucune minute de MARCHE réelle de nuit n'a encore été mesurée pour
+# la machine 2 — la détection de marche de nuit avec le seuil 25 n'est pas
+# validée. Le journal affiche le % de secondes en mouvement de chaque minute
+# pour pouvoir réajuster ces constantes.
+ZONE_M2 = (233, 94, 289, 118)
 FLOU_M2 = (5, 5)
-SEUIL_AMPLITUDE_M2 = 10
+SEUIL_AMPLITUDE_M2 = 25
 SEUIL_FRACTION_M2 = 0.05
 
 # Commun aux deux machines.

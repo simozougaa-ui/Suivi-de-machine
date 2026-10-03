@@ -2106,3 +2106,95 @@ l'écrire.
 - **Non vérifié ici** (aucun accès DVR/Jetson) : la durée réelle d'un
   passage sans l'attente de 30 s, et donc la dérive restante. Voir
   « Mesure à faire sur le Jetson ».
+
+---
+
+# Machine 2 : zone D et seuil d'amplitude 25 (2026-10-04)
+
+## Problème
+
+Avec la zone C (233, 91, 250, 121) et `SEUIL_AMPLITUDE_M2 = 10`, le bruit de
+la caméra le soir et la nuit (scintillement de luminosité) passait pour du
+mouvement : machine-2 affichée « marche » presque toute la nuit du 03/10, et
+restée « marche » après son arrêt réel de 20:30 le 01/10 (90 à 100 % de
+secondes en mouvement).
+
+## Mesures de référence (outils_zones/seuils.py, 60 s par instant)
+
+Même méthode que la production. Zone D (233, 94, 289, 118), seuil 25,
+% de secondes en mouvement :
+
+| Instant | État réel | % |
+|---|---|---|
+| 30/09 10:38 | marche | 94,8 |
+| 01/10 20:20 | marche | 100,0 |
+| 01/10 14:45 | arrêt | 1,8 |
+| 01/10 20:31 | arrêt | 0,0 |
+| 01/10 20:50 | arrêt | 8,5 |
+| 01/10 21:10 | arrêt | 1,7 |
+| 01/10 03:56 | arrêt (confirmé par le propriétaire) | 5,1 |
+
+Les 7 instants sont bien classés avec la règle des 40 %. Aucun autre couple
+testé (zones C et D, seuils 10, 15, 18, 20, 25) ne fait mieux ; le seuil 10
+donne de faux « marche » le soir et la nuit.
+
+## Changement
+
+Dans `machine_etat/detecter_marche_arret.py`, et seulement là :
+`ZONE_M2 = (233, 94, 289, 118)` et `SEUIL_AMPLITUDE_M2 = 25`. Inchangés :
+`SEUIL_FRACTION_M2 = 0.05`, flou (5,5) sur l'image entière puis découpage,
+règle des 40 % (`SEUIL_MINUTE_POURCENT`). Les mesures ci-dessus et la limite
+sont recopiées en commentaire au-dessus des constantes.
+
+Rien d'autre ne bouge : machine-1 (zone, seuils, flou 7x7, minutes
+envoyées), lecture vidéo, curseurs, verrou, `--repartir-a-jour`, envoi.
+`outils_zones/` n'est pas touché. Le journal affiche toujours, pour chaque
+minute de machine-2, l'état et le « % de secondes en mouvement ».
+
+Choix techniques (autonomes) : simple changement de constantes, sans
+interrupteur ni conservation de l'ancien réglage dans le code (l'historique
+git suffit, et deux réglages coexistants compliqueraient la lecture du
+journal). `amplitude_zone_m2()` prend ses valeurs par défaut au moment de sa
+définition : un test vérifie que ces valeurs par défaut sont bien D et 25,
+pas seulement les constantes.
+
+## Limite
+
+Aucune minute de MARCHE réelle de nuit n'a été mesurée pour machine-2 : la
+détection de marche de nuit avec le seuil 25 n'est pas validée. Si une
+marche de nuit apparaît « arrêt », regarder son % de secondes en mouvement
+dans le journal avant de réajuster.
+
+Le démarrage partiel de 14:47:30 (46,6 % de secondes en mouvement avec
+l'ancien réglage, donc « marche » de justesse) est à re-mesurer sur le
+Jetson avec le nouveau réglage.
+
+## Données déjà envoyées
+
+Les minutes de machine-2 déjà enregistrées dans l'application avec l'ancien
+réglage restent fausses : ce changement ne supprime ni ne réécrit rien
+côté application. L'application a une suppression bornée (par période),
+réservée à l'administrateur, pour les retirer si besoin.
+
+## Commande de contrôle sans envoi (une ligne, depuis Termux/SSH)
+
+    cd ~/suivi-de-machine && git pull origin main && .venv/bin/python3 machine_etat/detecter_marche_arret.py --date 2026-10-01 --debut 20:28 --fin 20:33 --sans-envoi --verbeux
+
+Attendu : machine-2 « arret » avec un faible % de secondes en mouvement sur
+les minutes après 20:30. `--sans-envoi` n'envoie rien et n'écrit aucun
+curseur ; le service peut continuer à tourner pendant ce contrôle.
+
+## Vérifications
+
+- `python3 -m unittest machine_etat.test_detecter_marche_arret` : 39/39
+  (34 précédents, aucun à corriger — ils utilisent `ZONE_M2` de façon
+  symbolique avec des amplitudes de 60 ou de 6 —, et 5 nouveaux) :
+  zone D et seuil 25, y compris les valeurs par défaut de
+  `amplitude_zone_m2` ; constantes de machine-1 inchangées ; un
+  scintillement d'amplitude 15 compté en mouvement avec l'ancien seuil 10
+  mais pas avec 25 ; une minute de ce bruit classée « arrêt » (0 %) par le
+  pipeline complet ; une variation forte dans la zone D classée « marche »
+  (100 %). L'équivalence machine-1 / lecture du correctif du 2026-10-03
+  passe toujours.
+- **Non vérifié ici** (aucun accès DVR/Jetson) : le résultat réel sur
+  20:28-20:33 le 01/10 et le cas de 14:47:30.

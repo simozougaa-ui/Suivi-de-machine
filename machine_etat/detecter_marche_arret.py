@@ -271,6 +271,27 @@ def repartir_a_jour(machines, maintenant=None):
     return cible
 
 
+def _duree_lisible(minutes):
+    if minutes < 60:
+        return f"{minutes} min"
+    return f"{minutes // 60} h {minutes % 60:02d} min"
+
+
+def ligne_saut(machine_id, ancien, nouveau):
+    """Ligne de journal d'une remise à jour pour une machine : ancienne et
+    nouvelle position du curseur, et durée du trou sauté (minutes qui
+    resteront « non mesurées »). `ancien` vaut None si la machine n'avait
+    encore aucun curseur : la durée sautée est alors inconnue."""
+    def heure(t):
+        return t.strftime("%H:%M" if t.date() == nouveau.date() else "%d/%m %H:%M")
+
+    if ancien is None:
+        return f"{machine_id} : aucun curseur -> {heure(nouveau)} (durée sautée inconnue)"
+    minutes = max(0, int((nouveau - ancien).total_seconds() // 60))
+    saut = "aucune minute sautée" if minutes == 0 else f"{_duree_lisible(minutes)} sautées"
+    return f"{machine_id} : curseur {heure(ancien)} -> {heure(nouveau)}, {saut}"
+
+
 def prendre_verrou():
     """Verrou exclusif non bloquant sur FICHIER_VERROU. Retourne le fichier
     ouvert (à garder ouvert jusqu'à la fin du processus), ou None si un autre
@@ -701,10 +722,15 @@ def main(argv=None):
         # Les DEUX machines, même si la machine 2 est désactivée : sinon son
         # vieux curseur ferait reculer la fenêtre partagée (minimum des
         # curseurs) le jour où on la réactive.
+        machines = [machine1_id, machine2_id]
         try:
-            cible = repartir_a_jour([machine1_id, machine2_id])
+            anciens = {m: lire_curseur(m) for m in machines}
+            cible = repartir_a_jour(machines)
+            nouveaux = {m: lire_curseur(m) for m in machines}
         finally:
             os.close(verrou)
+        for m in machines:
+            logger.info("%s", ligne_saut(m, anciens[m], nouveaux[m]))
         logger.info(
             "Curseurs de %s et %s placés à %s : rien analysé, rien envoyé. Les "
             "minutes sautées restent « non mesurées » dans l'application.",

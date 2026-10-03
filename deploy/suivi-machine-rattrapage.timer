@@ -1,0 +1,25 @@
+[Unit]
+Description=Remise a jour quotidienne des curseurs marche/arret (08:00, tous les jours)
+
+[Timer]
+# Heure de la remise a jour : c'est la SEULE ligne a modifier pour la changer
+# (format HH:MM:SS, tous les jours y compris le week-end), puis
+# « sudo systemctl daemon-reload ».
+#
+# Volontairement SANS fuseau horaire ecrit apres l'heure : systemd l'interprete
+# alors dans le fuseau du Jetson, le meme que celui qu'utilise journalctl pour
+# afficher les lignes de journal et que celui avec lequel
+# detecter_marche_arret.py calcule ses fenetres DVR (datetime.now()). 08:00
+# ici = 08:00 sur les lignes de journal de suivi-machine-etat. Ne PAS ajouter
+# « Africa/Casablanca » : les journaux du Jetson s'affichent en « +00 » tout
+# en montrant l'heure locale du Maroc, l'ajouter decalerait le declenchement
+# d'une heure par rapport aux journaux.
+OnCalendar=*-*-* 08:00:00
+
+# Jetson eteint a 8 h : on ne rejoue PAS la remise a jour au redemarrage plus
+# tard dans la journee (le trou gris tomberait en pleine production).
+Persistent=false
+AccuracySec=10s
+
+[Install]
+WantedBy=timers.target

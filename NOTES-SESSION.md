@@ -2198,3 +2198,135 @@ curseur ; le service peut continuer à tourner pendant ce contrôle.
   passe toujours.
 - **Non vérifié ici** (aucun accès DVR/Jetson) : le résultat réel sur
   20:28-20:33 le 01/10 et le cas de 14:47:30.
+
+---
+
+# Remise à jour quotidienne à 8 h (2026-10-04)
+
+## Pourquoi
+
+Le DVR rejoue à vitesse réelle (« Lecture : 4500 images en 300,9 s pour
+300 s de vidéo ») : chaque passage dure un peu plus que la fenêtre qu'il
+traite, le retard sur le direct grandit d'environ 4 s par passage (~19 min
+par jour) et ne se résorbe jamais seul. Décision du propriétaire : les
+machines sont à l'arrêt entre 6 h et 9 h ; une remise à jour automatique
+chaque jour à 8 h, week-end compris, supprime le retard, et le trou gris
+qu'elle crée tombe sur une période d'arrêt.
+
+## Fonctionnement
+
+Deux nouvelles unités dans `deploy/` :
+
+- `suivi-machine-rattrapage.timer` : `OnCalendar=*-*-* 08:00:00`, une seule
+  ligne à modifier pour changer l'heure (puis `daemon-reload`).
+  `Persistent=false` : si le Jetson était éteint à 8 h, rien n'est rejoué à
+  son redémarrage.
+- `suivi-machine-rattrapage.service` (oneshot) :
+  1. arrête `suivi-machine-etat.timer` et `suivi-machine-etat.service` (le
+     passage en cours est coupé, c'est accepté : il tourne presque en
+     continu et tient le verrou) ;
+  2. lance `detecter_marche_arret.py --repartir-a-jour` (curseurs des deux
+     machines à maintenant − 5 min, rien lu, rien envoyé) ;
+  3. relance `suivi-machine-etat.timer`, même si l'étape 1 ou 2 a échoué.
+
+## Choix techniques (autonomes)
+
+**Pas de script shell, tout dans l'unité.** Le service entier tourne avec
+`User=mbelkhayat` : la commande Python ne peut donc jamais s'exécuter en
+root, par construction, sans `runuser` ni `sudo -u`. Seules les deux
+commandes `systemctl` ont le préfixe `+` de systemd, qui les exécute avec
+les droits complets. C'est l'architecture la plus courte qui respecte la
+contrainte, et un test vérifie que la ligne Python n'a jamais de `+`.
+
+**Relance garantie par `ExecStopPost=`.** systemd l'exécute après l'arrêt
+du service quelle qu'en soit la cause : succès, échec de l'arrêt ou de
+`--repartir-a-jour`, délai dépassé, processus tué. Plus sûr qu'un `trap`
+bash, qui ne couvre pas tous les signaux. La relance n'a lieu que si le
+timer de détection est activé (`is-enabled`) : un timer désactivé
+volontairement par l'administrateur n'est pas rallumé dans son dos.
+`--no-block` évite toute attente croisée entre unités.
+
+**Heure : même horloge que les journaux, sans fuseau écrit.** Un
+`OnCalendar` sans fuseau est interprété dans le fuseau du Jetson, celui
+que `journalctl` utilise pour afficher ses lignes et celui avec lequel
+`detecter_marche_arret.py` calcule ses fenêtres DVR (`datetime.now()`,
+aucune variable TZ dans les unités). 08:00 du timer = 08:00 sur les lignes
+de journal de `suivi-machine-etat`, quel que soit le réglage du fuseau.
+Les journaux s'affichent en « +00 » tout en montrant l'heure locale du
+Maroc : le fuseau du Jetson est UTC mais son horloge est à l'heure
+marocaine. Il ne faut donc PAS écrire `Africa/Casablanca` dans
+`OnCalendar` (déclenchement décalé d'une heure par rapport aux journaux).
+Il ne faut pas non plus changer le fuseau du Jetson sans vérifier l'heure
+du DVR : les fenêtres de relecture se décaleraient d'autant. Pas pu être
+vérifié ici (aucun accès au Jetson) : contrôler avec la commande (d)
+ci-dessous, dont la colonne NEXT est dans la même horloge que les
+journaux.
+
+**Passage coupé net : `curseur.json` reste cohérent.** Vérifié dans le code :
+`_ecrire_curseurs()` écrit un fichier temporaire du même dossier, `fsync`,
+puis `os.replace()` (atomique sur un même système de fichiers). Un SIGTERM
+à n'importe quel instant laisse l'ancien ou le nouveau fichier, jamais un
+fichier tronqué ; au pire un `.curseur.*.tmp` reste (gitignoré, jamais
+relu). Le verrou `flock` est libéré par le noyau à la mort du processus.
+Les minutes du passage coupé n'ont pas été envoyées : elles tombent dans
+le trou gris. Point relevé mais non modifié (l'envoi est hors du
+périmètre) : `mettre_en_file()` n'écrit pas ses lots de façon atomique. Un
+arrêt exactement pendant cette écriture, très improbable, pourrait laisser
+un lot illisible qui bloquerait la file d'attente.
+
+**Journal.** `--repartir-a-jour` écrit maintenant une ligne par machine,
+par exemple « machine-1 : curseur 07:40 -> 08:00, 20 min sautées », ou
+« machine-2 : aucun curseur -> 08:00 (durée sautée inconnue) ». Son
+comportement et son code de sortie ne changent pas.
+
+## Ce que l'on voit dans l'application
+
+Le retard de la frise grandit pendant la journée, d'environ 4 s par passage
+(≈ 10 min vers 20 h, ≈ 19 min juste avant 8 h le lendemain), puis retombe
+à zéro à 8 h. Le trou gris du matin dure autant que le retard accumulé
+(≈ 20 min, autour de 7 h 40 – 8 h). Les minutes grises sont « non
+mesurées », pas des arrêts : rien n'est inventé ni envoyé pour elles.
+
+## Commandes (une ligne chacune, depuis Termux/SSH)
+
+(a) Installation :
+
+    cd ~/suivi-de-machine && git pull origin main && sudo cp deploy/suivi-machine-rattrapage.service deploy/suivi-machine-rattrapage.timer /etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl enable --now suivi-machine-rattrapage.timer
+
+(b) Déclenchement immédiat pour tester (crée un trou gris égal au retard
+actuel) :
+
+    sudo systemctl start suivi-machine-rattrapage.service
+
+(c) Les 20 dernières lignes du journal du rattrapage :
+
+    sudo journalctl -u suivi-machine-rattrapage.service -n 20 --no-pager
+
+(d) Prochain déclenchement (NEXT doit être 08:00 dans l'horloge des
+journaux) :
+
+    systemctl list-timers suivi-machine-rattrapage.timer --no-pager
+
+(e) Désactivation complète :
+
+    sudo systemctl disable --now suivi-machine-rattrapage.timer
+
+## Vérifications
+
+- `systemd-analyze verify` sur les deux nouvelles unités et les deux
+  unités de détection : aucun avertissement. Ici, les chemins
+  `/home/mbelkhayat/...` ont été recréés temporairement pour cette
+  vérification, puis supprimés. `systemd-analyze calendar "*-*-* 08:00:00"`
+  donne bien 08:00 tous les jours. L'extrait shell de `ExecStopPost` passe
+  `sh -n` et `bash -n`. Il n'y a pas de script séparé.
+- `python3 -m unittest machine_etat.test_detecter_marche_arret` : 47/47.
+  Les 39 précédents passent, plus 8 nouveaux : la ligne de journal
+  (trou nul, 20 min, curseur absent, plusieurs heures sur la veille) ;
+  le journal réel de `--repartir-a-jour` (code de sortie et curseurs
+  inchangés) ; les invariants des unités (Python jamais en root, arrêt
+  puis relance du timer de détection, 08:00 sans fuseau,
+  `Persistent=false`).
+- **Non vérifié ici** (aucun accès au Jetson, pas de systemd en
+  fonctionnement dans ce conteneur) : le déclenchement réel à 8 h, la
+  relance effective du timer de détection après un échec, et le fuseau du
+  Jetson (commande (d)).

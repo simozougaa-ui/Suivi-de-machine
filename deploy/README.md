@@ -16,3 +16,10 @@ accessible depuis n'importe quel appareil sur le même réseau Tailscale
 Accès à distance (hors réseau local) : Tailscale doit être installé et
 connecté (`sudo tailscale up`) — voir la documentation Tailscale pour
 l'authentification.
+
+## Remise à jour quotidienne de la détection marche/arrêt (8 h)
+
+`suivi-machine-rattrapage.timer` + `suivi-machine-rattrapage.service` :
+chaque jour à 08:00, saute le retard accumulé par
+`suivi-machine-etat` (voir NOTES-SESSION.md, « Remise à jour quotidienne à
+8 h », pour l'installation en une ligne et le fonctionnement).

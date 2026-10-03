@@ -1,0 +1,29 @@
+[Unit]
+Description=Remise a jour quotidienne des curseurs marche/arret (saute le retard accumule)
+# Declenche par suivi-machine-rattrapage.timer (chaque jour a 08:00).
+# Voir NOTES-SESSION.md, « Remise a jour quotidienne a 8 h ».
+
+[Service]
+Type=oneshot
+# Le service entier tourne sous l'utilisateur du projet : la commande Python
+# ne peut donc JAMAIS tourner en root (sinon curseur.json deviendrait la
+# propriete de root et suivi-machine-etat.service ne pourrait plus l'ecrire).
+User=mbelkhayat
+WorkingDirectory=/home/mbelkhayat/suivi-de-machine
+
+# Le prefixe « + » execute UNIQUEMENT ces lignes avec les droits root
+# (necessaires pour piloter systemd). Le passage de detection en cours est
+# coupe : accepte, il tourne presque en continu et tient le verrou.
+ExecStartPre=+systemctl stop suivi-machine-etat.timer suivi-machine-etat.service
+ExecStart=/home/mbelkhayat/suivi-de-machine/.venv/bin/python3 machine_etat/detecter_marche_arret.py --repartir-a-jour
+
+# Relance du timer de detection : ExecStopPost s'execute apres l'arret de ce
+# service QUELLE QU'EN SOIT LA CAUSE (succes, echec de --repartir-a-jour ou
+# de l'arret ci-dessus, delai depasse, processus tue). Seulement si le timer
+# de detection est active au demarrage (enabled) : un timer volontairement
+# desactive par l'administrateur n'est pas rallume dans son dos.
+ExecStopPost=+/bin/sh -c 'if systemctl is-enabled --quiet suivi-machine-etat.timer; then systemctl start --no-block suivi-machine-etat.timer; fi'
+
+# --repartir-a-jour ne lit pas le DVR : quelques secondes suffisent. Large
+# marge pour l'arret du passage en cours (SIGTERM, puis SIGKILL apres 90 s).
+TimeoutStartSec=180

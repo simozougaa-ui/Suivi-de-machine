@@ -665,6 +665,16 @@ class TestRepartirAJour(unittest.TestCase):
             for p in patches:
                 p.stop()
 
+    def test_journal_ancien_nouveau_et_duree_par_machine(self):
+        dma._ecrire_curseurs({"machine-1": self.ANCIEN})  # machine-2 sans curseur
+        with self.assertLogs("machine_etat", level="INFO") as journal:
+            self.assertEqual(self._repartir(), 0)
+        sortie = "\n".join(journal.output)
+        self.assertIn("machine-1 : curseur 07:15 -> 16:47, 9 h 32 min sautées", sortie)
+        self.assertIn("machine-2 : aucun curseur -> 16:47 (durée sautée inconnue)", sortie)
+        self.assertEqual(lire_curseur("machine-1"), self.CIBLE)
+        self.assertEqual(lire_curseur("machine-2"), self.CIBLE)
+
     def test_place_les_deux_curseurs_sans_rien_envoyer(self):
         self.assertEqual(self._repartir(), 0)
         self.assertEqual(lire_curseur("machine-1"), self.CIBLE)
@@ -817,6 +827,72 @@ class TestReglageMachine2ZoneDSeuil25(unittest.TestCase):
         self.assertEqual(len(lignes), 1)
         self.assertEqual(lignes[0]["etat"], "marche")
         self.assertEqual(lignes[0]["pourcentage"], 100.0)
+
+
+# --- Remise à jour quotidienne à 8 h (2026-10-04) ----------------------------
+
+class TestLigneSaut(unittest.TestCase):
+    """Ligne de journal écrite par --repartir-a-jour pour chaque machine."""
+
+    nouveau = datetime(2026, 10, 5, 8, 0)
+
+    def test_trou_nul(self):
+        self.assertEqual(dma.ligne_saut("machine-1", self.nouveau, self.nouveau),
+                         "machine-1 : curseur 08:00 -> 08:00, aucune minute sautée")
+
+    def test_trou_de_20_minutes(self):
+        self.assertEqual(dma.ligne_saut("machine-1", datetime(2026, 10, 5, 7, 40), self.nouveau),
+                         "machine-1 : curseur 07:40 -> 08:00, 20 min sautées")
+
+    def test_curseur_absent(self):
+        self.assertEqual(dma.ligne_saut("machine-2", None, self.nouveau),
+                         "machine-2 : aucun curseur -> 08:00 (durée sautée inconnue)")
+
+    def test_trou_de_plusieurs_heures_sur_la_veille(self):
+        self.assertEqual(dma.ligne_saut("machine-2", datetime(2026, 10, 4, 22, 28), self.nouveau),
+                         "machine-2 : curseur 04/10 22:28 -> 08:00, 9 h 32 min sautées")
+
+
+def _lire_unite(nom):
+    """Lignes « clé=valeur » d'une unité systemd de deploy/ (les clés
+    répétées, comme ExecStartPre, sont toutes gardées)."""
+    chemin = os.path.join(dma.ROOT, "deploy", nom)
+    paires = []
+    with open(chemin, encoding="utf-8") as f:
+        for ligne in f:
+            ligne = ligne.strip()
+            if ligne and not ligne.startswith(("#", "[")) and "=" in ligne:
+                cle, valeur = ligne.split("=", 1)
+                paires.append((cle.strip(), valeur.strip()))
+    return paires
+
+
+class TestUnitesRattrapage(unittest.TestCase):
+    """Invariants des unités deploy/suivi-machine-rattrapage.* qui ne
+    doivent pas régresser lors d'une modification future (la syntaxe
+    elle-même est vérifiée par systemd-analyze verify, voir NOTES)."""
+
+    def test_python_jamais_en_root(self):
+        service = _lire_unite("suivi-machine-rattrapage.service")
+        self.assertIn(("User", "mbelkhayat"), service)
+        exec_start = [v for c, v in service if c == "ExecStart"]
+        self.assertEqual(len(exec_start), 1)
+        self.assertIn("--repartir-a-jour", exec_start[0])
+        self.assertFalse(exec_start[0].startswith(("+", "!")),
+                         "la commande Python ne doit jamais être élevée en root")
+
+    def test_arret_puis_relance_toujours_du_timer_de_detection(self):
+        service = dict(_lire_unite("suivi-machine-rattrapage.service"))
+        self.assertTrue(service["ExecStartPre"].startswith("+"))
+        self.assertIn("stop suivi-machine-etat.timer suivi-machine-etat.service", service["ExecStartPre"])
+        self.assertTrue(service["ExecStopPost"].startswith("+"))
+        self.assertIn("start --no-block suivi-machine-etat.timer", service["ExecStopPost"])
+
+    def test_timer_8h_tous_les_jours_sans_rattrapage_ni_fuseau(self):
+        timer = _lire_unite("suivi-machine-rattrapage.timer")
+        on_calendar = [v for c, v in timer if c == "OnCalendar"]
+        self.assertEqual(on_calendar, ["*-*-* 08:00:00"])
+        self.assertIn(("Persistent", "false"), timer)
 
 
 if __name__ == "__main__":

@@ -350,5 +350,39 @@ class TestDelaiDepasse(unittest.TestCase):
         self.assertNotIn("Secret", r.erreur)
 
 
+class TestCorrectionsPoint8(unittest.TestCase):
+    """Corrections du 2026-10-04 : une mesure coupée au délai n'est plus
+    présentée comme une vitesse ni comme « meilleure » ; le téléchargement
+    HTTP affiche son facteur par rapport au temps réel."""
+
+    def _r(self, nom, images=0, duree=0.0, erreur=None, facteur=None):
+        r = vitesse_lecture.Resultat(nom)
+        r.images, r.duree_s, r.erreur = images, duree, erreur
+        r.facteur_temps_reel = facteur
+        return r
+
+    def test_mesure_en_echec_a_une_vitesse_relative_nulle(self):
+        r = self._r("rtsp coupé", images=441, duree=65.0,
+                    erreur="arrêté au délai maxi (441/450 images reçues ; vitesse non mesurable)")
+        self.assertEqual(r.vitesse_relative(), 0.0)
+        self.assertIn("échec", r.verdict())
+
+    def test_http_affiche_le_facteur_temps_reel(self):
+        r = self._r("http", facteur=25.0)
+        self.assertEqual(r.vitesse_relative(), 25.0)
+        self.assertIn("25x plus rapide", r.verdict())
+
+    def test_conclusion_ne_choisit_pas_une_mesure_invalide(self):
+        # La RTSP « rapide » en apparence (beaucoup d'images) mais coupée au
+        # délai ne doit pas être désignée meilleure ; le HTTP (facteur) gagne.
+        resultats = [
+            self._r("rtsp coupé", images=441, duree=18.0, erreur="arrêté au délai maxi"),
+            self._r("http", facteur=25.0),
+        ]
+        tableau = vitesse_lecture.construire_tableau(resultats, duree=30, timer_actif=False)
+        self.assertIn("Meilleure : http", tableau)
+        self.assertNotIn("Meilleure : rtsp coupé", tableau)
+
+
 if __name__ == "__main__":
     unittest.main()

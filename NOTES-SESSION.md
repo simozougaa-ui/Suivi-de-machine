@@ -2419,3 +2419,165 @@ réussi, il sera simplement refait) :
   inchangés. Rien modifié dans machine_etat/ ni deploy/.
 - **Non vérifié ici** (aucun accès DVR/Jetson) : les mesures réelles. À
   lancer par le propriétaire avec la commande (a).
+
+---
+
+# Lecture du DVR par téléchargement HTTP (2026-10-04)
+
+## Mesure de départ
+
+La relecture RTSP rejoue à vitesse réelle ou moins : journal du 03/10
+« Lecture : 4500 images en 357,8 s pour 300 s de vidéo », ~12,6 img/s. Un
+passage dure ~6 min pour 5 min de vidéo, le retard grandit de ~1 min par
+passage (~10 min/h) et la lecture RTSP ne peut jamais le rattraper.
+
+`outils_zones/vitesse_lecture.py` (2 répétitions, 30 s/méthode) sur le
+Jetson a montré :
+- RTSP (toutes variantes TCP/UDP, récent/ancien) : coupées au délai maxi
+  (le DVR envoie ~441/450 images puis OpenCV attend 2 timeouts de 30 s) —
+  pas une vitesse exploitable.
+- Deux lectures RTSP parallèles : acceptées (chacune ~17 s pour ses 225 img).
+- **Téléchargement HTTP (loadfile.cgi)** : 5,6 Mo pour 30 s en ~1,1 s
+  (~25x le temps réel). Pour 5 min, ~56 Mo en ~12 s.
+- Scale (relecture accélérée) : non exposé par OpenCV.
+
+Conclusion : télécharger la fenêtre en fichier puis la lire localement.
+
+## Fonctionnement
+
+Nouveau module `machine_etat/lecture_dvr.py` : télécharge [debut, fin] via
+`loadfile.cgi` (auth HTTP digest, jamais d'identifiants dans l'URL ni les
+journaux — `masquer()`) vers un fichier temporaire sur disque
+(`/tmp/suivi-machine-dvr/`, droits 0600), en flux direct (jamais tout en
+mémoire), avec :
+- vérification de l'espace disque libre AVANT (refus si insuffisant) ;
+- délai maximal et une nouvelle tentative ;
+- vérification de taille (fichier non vide, au-dessus d'un plancher) ;
+- suppression du fichier dans TOUS les cas (succès, erreur, interruption,
+  via un gestionnaire de contexte) et au démarrage du script
+  (`nettoyer_restes()` pour les restes d'un passage tué).
+
+`detecter_marche_arret.py` lit ensuite le fichier avec OpenCV
+(`cv2.VideoCapture` sur le fichier). Si OpenCV n'y arrive pas et que
+`ffmpeg` est installé, remuxage en MP4 (copie des flux, sans réencodage)
+puis nouvelle tentative ; sinon échec propre → secours RTSP.
+
+## Choix techniques (autonomes)
+
+**Un seul cœur de classification.** `analyser_fenetre` (RTSP, inchangée) et
+`analyser_fenetre_http` (nouvelle) appellent la MÊME fonction
+`analyser_capture(capture, …)`, qui ne dépend que d'un objet type
+`cv2.VideoCapture`. C'est la garantie que les deux méthodes produisent
+exactement les mêmes minutes : mêmes gris, mêmes flous (machine 1 (7,7),
+machine 2 (5,5) puis découpage), mêmes seuils, mêmes zones, même règle des
+40 %, même mappage index→temps (image 0 = `debut`, comme la relecture RTSP
+qui démarre à starttime).
+
+**Bascule sûre par .env.** `LECTURE_DVR=rtsp` (défaut) ou `http`. Tant que
+le propriétaire ne met pas `http`, AUCUN changement de comportement. Avec
+`http`, tout échec de téléchargement ou de lecture d'une fenêtre retombe
+automatiquement sur RTSP pour CETTE fenêtre, journalisé avec la cause. Le
+curseur n'avance toujours qu'après un envoi réussi (logique inchangée) :
+jamais de minutes issues d'une lecture partielle ou invalide (une minute
+à moins de 30 s lues est rejetée par `classer()`, comme avant).
+
+**Alignement.** Le fichier et le flux RTSP servent la même piste
+d'enregistrement et sont supposés démarrer au même instant ; l'image 0 est
+donc mappée sur `debut` dans les deux cas. Si `--comparer-lectures` révélait
+un décalage constant (keyframe d'avance), `DVR_HTTP_IMAGES_AVANCE=N` dans
+.env rogne N images en tête du fichier sans toucher au code (0 par défaut).
+Les fenêtres incomplètes (fichier plus court : trou d'enregistrement ou
+téléchargement partiel) suivent les mêmes règles qu'en RTSP (secondes et
+minutes incomplètes ignorées).
+
+**Rattrapage du retard.** Avec la lecture HTTP (rapide), un passage
+automatique enchaîne plusieurs fenêtres tant qu'il reste du retard et que
+le temps écoulé reste sous `BUDGET_RATTRAPAGE_S = 300 s` (marge nette sous
+`TimeoutStartSec=480`), en avançant le curseur après chaque envoi réussi.
+Le plafond par fenêtre (`PLAFOND_RATTRAPAGE_MINUTES = 5 min`) est inchangé.
+En RTSP, budget 0 : une seule fenêtre par passage (enchaîner dépasserait le
+délai), comportement d'avant.
+
+**Intervalle du timer.** `suivi-machine-etat.timer` est `OnCalendar=*:0/5`
+(toutes les 5 min). Les passages du journal étaient espacés de ~6 min parce
+qu'un passage de ~6 min chevauche le point de calendrier suivant, qui est
+alors sauté. Une fois les passages redevenus courts (lecture HTTP), le
+timer refire toutes les 5 min normalement ; systemd ne démarre jamais un
+second passage tant que le service précédent tourne (unité unique), donc
+aucun empilement. `deploy/` n'a pas été modifié (aucune nécessité).
+
+**Journal.** Pour chaque fenêtre : « Lecture HTTP : X Mo en Y s + lecture
+Z s (n/N images) » ou « Lecture RTSP : … », puis le nombre de minutes
+classées avec la méthode réellement utilisée (http / rtsp / secours-rtsp).
+L'avertissement « Passage plus long que la fenêtre » est conservé.
+
+## Outil de validation
+
+`--comparer-lectures` (avec `--date/--debut/--fin`) analyse la même fenêtre
+par HTTP puis par RTSP et affiche, par minute et par machine, l'état et le
+pourcentage des deux, avec un verdict d'équivalence (même état partout et
+écart de pourcentage ≤ 5 points). N'envoie rien, n'écrit aucun curseur.
+Cas de référence du propriétaire, 01/10 20:28→20:33, états attendus :
+machine-1 arrêt (0,0,0,10,0 %) ; machine-2 marche 100 %, marche 100 %,
+arrêt 20 %, arrêt 0 %, arrêt 0 %.
+
+## Correction de outils_zones/vitesse_lecture.py (point 8)
+
+Seul changement autorisé dans outils_zones/ : une mesure coupée au délai
+maxi est désormais marquée en échec (plus de fausse « vitesse », jamais
+« meilleure ») ; le téléchargement HTTP affiche son facteur (« 25x plus
+rapide que le temps réel ») ; la conclusion choisit la meilleure méthode
+par sa vitesse relative au temps réel, en ignorant les mesures invalides.
+
+## Ce qui n'a PAS pu être vérifié ici (aucun accès DVR/Jetson)
+
+- Que `loadfile.cgi` répond et que le fichier est lisible par OpenCV (les
+  fichiers Dahua sont souvent du `.dav`, pas toujours lu directement). Si
+  OpenCV échoue et que ffmpeg est absent, le secours RTSP prend le relais :
+  installer `ffmpeg` sur le Jetson avant d'activer `http` est recommandé.
+- L'équivalence réelle des minutes HTTP vs RTSP : à valider avec
+  `--comparer-lectures` AVANT d'activer.
+- L'alignement exact du fichier (d'où le garde-fou `DVR_HTTP_IMAGES_AVANCE`).
+- La durée réelle d'un passage HTTP et donc le rattrapage effectif.
+
+La remise à jour quotidienne de 8 h (`suivi-machine-rattrapage.timer`)
+reste en place comme filet de sécurité ; elle n'est plus nécessaire si le
+rattrapage HTTP résorbe le retard, mais ne gêne pas (elle ne fait que
+remettre les curseurs à jour sur une période d'arrêt).
+
+## Commandes (une ligne chacune, depuis Termux/SSH)
+
+(a) Validation sans envoi (À FAIRE avant toute activation) :
+
+    cd ~/suivi-de-machine && git pull origin main && .venv/bin/python3 machine_etat/detecter_marche_arret.py --date 2026-10-01 --debut 20:28 --fin 20:33 --sans-envoi --comparer-lectures
+
+(b) Activation (ajoute LECTURE_DVR=http au .env sans remplacer le fichier) :
+
+    grep -q '^LECTURE_DVR=' ~/suivi-de-machine/.env && sed -i 's/^LECTURE_DVR=.*/LECTURE_DVR=http/' ~/suivi-de-machine/.env || echo 'LECTURE_DVR=http' >> ~/suivi-de-machine/.env
+
+(c) Retour à la lecture RTSP :
+
+    sed -i 's/^LECTURE_DVR=.*/LECTURE_DVR=rtsp/' ~/suivi-de-machine/.env
+
+(d) Les 20 dernières lignes utiles du journal du service de détection :
+
+    sudo journalctl -u suivi-machine-etat.service -n 20 --no-pager
+
+(e) Taille et contenu du dossier temporaire (devrait être quasi vide : les
+fichiers sont supprimés après chaque fenêtre) :
+
+    du -sh /tmp/suivi-machine-dvr 2>/dev/null; ls -l /tmp/suivi-machine-dvr 2>/dev/null
+
+## Vérifications ici
+
+- `python3 -m unittest machine_etat.test_detecter_marche_arret` : 71/71
+  (47 précédents + 24 nouveaux : téléchargement simulé — succès, vide,
+  tronqué, HTTP 404, interruption, délai dépassé — avec nettoyage du
+  fichier garanti ; masquage des identifiants ; bascule .env ; secours
+  RTSP automatique ; alignement/rognage ; secondes incomplètes HTTP ;
+  équivalence flux/fichier pour machine 1 et machine 2 ; comparaison de
+  minutes ; budget de rattrapage < timeout).
+- `python3 -m unittest outils_zones.test_outils_zones` : 32/32 (29 + 3
+  pour le point 8).
+- Les chemins DVR/Jetson réels n'existent pas ici : tout ce qui touche au
+  réseau est testé avec des doubles, jamais contre un vrai DVR.

@@ -895,5 +895,302 @@ class TestUnitesRattrapage(unittest.TestCase):
         self.assertIn(("Persistent", "false"), timer)
 
 
+# --- Bascule lecture HTTP du DVR (2026-10-04) --------------------------------
+
+class FauxReponseHTTP:
+    """Simule la réponse streaming de requests pour lecture_dvr : rend des
+    blocs via iter_content, un status_code, et peut lever en cours de flux."""
+
+    def __init__(self, blocs, status_code=200, lever_a=None):
+        self._blocs = blocs
+        self.status_code = status_code
+        self._lever_a = lever_a
+        self.ferme = False
+
+    def iter_content(self, taille):
+        for i, bloc in enumerate(self._blocs):
+            if self._lever_a is not None and i == self._lever_a:
+                raise ConnectionResetError("coupure réseau simulée")
+            yield bloc
+
+    def close(self):
+        self.ferme = True
+
+
+def _faux_session(reponse):
+    def session_get(url, auth, delai_connexion, delai_lecture):
+        return reponse
+    return session_get
+
+
+class TestTelechargementDVR(unittest.TestCase):
+    def setUp(self):
+        self._dossier = tempfile.TemporaryDirectory()
+        self._patch = mock.patch.object(dma.lecture_dvr, "DOSSIER_TMP", self._dossier.name)
+        self._patch.start()
+        self._env = mock.patch.dict(os.environ, {
+            "DVR_IP": "192.168.0.9", "DVR_USER": "admin", "DVR_PASSWORD": "Secret123",
+            "CAMERA_CHANNEL": "15"})
+        self._env.start()
+        self.debut = datetime(2026, 10, 1, 20, 28)
+        self.fin = datetime(2026, 10, 1, 20, 33)
+
+    def tearDown(self):
+        self._env.stop()
+        self._patch.stop()
+        self._dossier.cleanup()
+
+    def _restes(self):
+        return os.listdir(self._dossier.name)
+
+    def test_succes_renvoie_chemin_et_octets(self):
+        gros = b"x" * 70000
+        session = _faux_session(FauxReponseHTTP([gros]))
+        chemin, octets = dma.lecture_dvr.telecharger_fenetre(
+            self.debut, self.fin, tentatives=1, session_get=session)
+        self.assertEqual(octets, 70000)
+        self.assertTrue(os.path.exists(chemin))
+        self.assertEqual(os.path.getsize(chemin), 70000)
+        dma.lecture_dvr._supprimer(chemin)
+
+    def test_contexte_supprime_le_fichier(self):
+        session = _faux_session(FauxReponseHTTP([b"x" * 70000]))
+        with dma.lecture_dvr.fenetre_telechargee(
+                self.debut, self.fin, tentatives=1, session_get=session) as (chemin, octets):
+            self.assertTrue(os.path.exists(chemin))
+        self.assertFalse(os.path.exists(chemin))
+        self.assertEqual(self._restes(), [])
+
+    def test_fichier_vide_echoue_et_nettoie(self):
+        session = _faux_session(FauxReponseHTTP([]))
+        with self.assertRaises(dma.lecture_dvr.ErreurTelechargement):
+            dma.lecture_dvr.telecharger_fenetre(self.debut, self.fin, tentatives=1, session_get=session)
+        self.assertEqual(self._restes(), [])
+
+    def test_fichier_tronque_sous_le_minimum_echoue(self):
+        session = _faux_session(FauxReponseHTTP([b"x" * 100]))
+        with self.assertRaises(dma.lecture_dvr.ErreurTelechargement):
+            dma.lecture_dvr.telecharger_fenetre(self.debut, self.fin, tentatives=1, session_get=session)
+        self.assertEqual(self._restes(), [])
+
+    def test_http_404_echoue(self):
+        session = _faux_session(FauxReponseHTTP([b"x" * 70000], status_code=404))
+        with self.assertRaises(dma.lecture_dvr.ErreurTelechargement):
+            dma.lecture_dvr.telecharger_fenetre(self.debut, self.fin, tentatives=1, session_get=session)
+        self.assertEqual(self._restes(), [])
+
+    def test_interruption_en_cours_de_flux_nettoie(self):
+        session = _faux_session(FauxReponseHTTP([b"x" * 40000, b"y" * 40000], lever_a=1))
+        with self.assertRaises(dma.lecture_dvr.ErreurTelechargement):
+            dma.lecture_dvr.telecharger_fenetre(self.debut, self.fin, tentatives=1, session_get=session)
+        self.assertEqual(self._restes(), [])
+
+    def test_delai_depasse_nettoie(self):
+        faux_temps = iter([0.0, 0.0, 10_000.0, 10_000.0])
+
+        def monotonic():
+            try:
+                return next(faux_temps)
+            except StopIteration:
+                return 10_000.0
+
+        session = _faux_session(FauxReponseHTTP([b"x" * 40000, b"y" * 40000]))
+        with mock.patch.object(dma.lecture_dvr.time, "monotonic", monotonic):
+            with self.assertRaises(dma.lecture_dvr.ErreurTelechargement):
+                dma.lecture_dvr.telecharger_fenetre(
+                    self.debut, self.fin, delai_max=1, tentatives=1, session_get=session)
+        self.assertEqual(self._restes(), [])
+
+    def test_identifiants_jamais_dans_l_erreur(self):
+        session = _faux_session(FauxReponseHTTP([], status_code=403))
+        try:
+            dma.lecture_dvr.telecharger_fenetre(self.debut, self.fin, tentatives=1, session_get=session)
+        except dma.lecture_dvr.ErreurTelechargement as e:
+            self.assertNotIn("Secret123", str(e))
+
+    def test_nettoyer_restes_vide_le_dossier(self):
+        reste = os.path.join(self._dossier.name, "vieux.dav")
+        with open(reste, "w") as f:
+            f.write("x")
+        dma.lecture_dvr.nettoyer_restes()
+        self.assertEqual(self._restes(), [])
+
+
+class TestMasquageLectureDvr(unittest.TestCase):
+    def test_masque_url_et_mot_de_passe(self):
+        with mock.patch.dict(os.environ, {"DVR_PASSWORD": "Secret123", "DVR_USER": "admin"}):
+            msg = dma.lecture_dvr.masquer(
+                "echec http://admin:Secret123@10.0.0.5/cgi-bin/loadfile.cgi")
+        self.assertNotIn("Secret123", msg)
+        self.assertIn("http://***@10.0.0.5", msg)
+
+
+class TestConfigLectureEtSecours(unittest.TestCase):
+    def test_config_lecture_defaut_rtsp(self):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("LECTURE_DVR", None)
+            self.assertEqual(dma.config_lecture(), "rtsp")
+
+    def test_config_lecture_http(self):
+        with mock.patch.dict(os.environ, {"LECTURE_DVR": "http"}):
+            self.assertEqual(dma.config_lecture(), "http")
+
+    def test_config_lecture_valeur_inconnue_reste_rtsp(self):
+        with mock.patch.dict(os.environ, {"LECTURE_DVR": "n'importe quoi"}):
+            self.assertEqual(dma.config_lecture(), "rtsp")
+
+    def test_secours_rtsp_si_http_echoue(self):
+        debut = datetime(2026, 10, 1, 20, 28)
+        fin = debut + timedelta(seconds=2)
+        frames = _frames_variees(2, 0)
+
+        def http_qui_echoue(*a, **k):
+            raise dma.lecture_dvr.ErreurTelechargement("DVR injoignable")
+
+        with mock.patch.object(dma, "analyser_fenetre_http", side_effect=http_qui_echoue), \
+                mock.patch.object(dma, "open_stream", return_value=FakeCapture(frames)), \
+                mock.patch.object(dma, "build_rtsp_playback_url", return_value="rtsp://factice"):
+            m1, m2, methode = dma.lire_analyser(debut, fin, "http", calculer_machine2=True)
+        self.assertEqual(methode, "secours-rtsp")
+        self.assertTrue(m1)  # des minutes ont bien été classées via RTSP
+
+    def test_http_reussi_renvoie_http(self):
+        debut = datetime(2026, 10, 1, 20, 28)
+        fin = debut + timedelta(seconds=2)
+        frames = _frames_variees(2, 0)
+
+        def http_ok(d, f, garder_frames=None, calculer_machine2=True):
+            m1, m2, *_ = dma.analyser_capture(FakeCapture(frames), d, f, calculer_machine2)
+            return m1, m2, {"octets": 1, "t_dl": 0.1, "t_lecture": 0.1, "images": 30, "total": 30}
+
+        with mock.patch.object(dma, "analyser_fenetre_http", side_effect=http_ok):
+            m1, m2, methode = dma.lire_analyser(debut, fin, "http", calculer_machine2=True)
+        self.assertEqual(methode, "http")
+
+
+class TestEquivalenceFluxFichier(unittest.TestCase):
+    """Le cœur analyser_capture donne les MÊMES minutes que la source soit un
+    « flux » ou un « fichier » (mêmes images) — machine 1 et machine 2."""
+
+    debut = datetime(2026, 10, 1, 20, 28)
+
+    def test_memes_minutes_m1_et_m2(self):
+        frames = _frames_variees(3, 0)
+        fin = self.debut + timedelta(seconds=3)
+        flux = dma.analyser_capture(FakeCapture(frames), self.debut, fin, calculer_machine2=True)
+        fichier = dma.analyser_capture(FakeCapture(list(frames)), self.debut, fin, calculer_machine2=True)
+        self.assertEqual(flux[0], fichier[0])   # par_minute_m1
+        self.assertEqual(flux[1], fichier[1])   # par_minute_m2
+
+    def test_analyser_fenetre_http_identique_a_rtsp(self):
+        import contextlib
+        frames = _frames_variees(3, 0)
+        fin = self.debut + timedelta(seconds=3)
+
+        @contextlib.contextmanager
+        def faux_contexte(d, f, **kw):
+            yield "/tmp/factice.dav", 70000
+
+        with mock.patch.object(dma, "open_stream", return_value=FakeCapture(frames)), \
+                mock.patch.object(dma, "build_rtsp_playback_url", return_value="rtsp://factice"):
+            m1_rtsp, m2_rtsp = dma.analyser_fenetre(self.debut, fin, calculer_machine2=True)
+
+        with mock.patch.object(dma.lecture_dvr, "fenetre_telechargee", faux_contexte), \
+                mock.patch.object(dma.lecture_dvr, "ouvrir_fichier",
+                                  return_value=(FakeCapture(frames), "/tmp/factice.dav")):
+            m1_http, m2_http, _ = dma.analyser_fenetre_http(self.debut, fin, calculer_machine2=True)
+
+        self.assertEqual(m1_rtsp, m1_http)
+        self.assertEqual(m2_rtsp, m2_http)
+
+
+class TestAlignementRognage(unittest.TestCase):
+    """`sauter` (DVR_HTTP_IMAGES_AVANCE) rogne un décalage constant en tête du
+    fichier sans changer les minutes par rapport à une fenêtre bien alignée."""
+
+    debut = datetime(2026, 10, 1, 20, 28)
+
+    def test_sauter_le_lead_in_donne_la_meme_fenetre(self):
+        fin = self.debut + timedelta(seconds=2)
+        fenetre = _frames_variees(2, 0)                 # 30 images alignées
+        fond = np.full((HAUTEUR, LARGEUR, 3), GRIS_FOND, dtype=np.uint8)
+        x1, y1, x2, y2 = ZONE
+        lead = []
+        for i in range(15):                             # 1 s de « piège » en tête
+            f = fond.copy()
+            f[y1:y2, x1:x2] = 0 if i % 2 == 0 else 255
+            lead.append(f)
+
+        aligne = dma.analyser_capture(FakeCapture(fenetre), self.debut, fin, calculer_machine2=True)
+        avec_lead = dma.analyser_capture(FakeCapture(lead + fenetre), self.debut, fin,
+                                         calculer_machine2=True, sauter=15)
+        self.assertEqual(aligne[0], avec_lead[0])
+        self.assertEqual(aligne[1], avec_lead[1])
+
+
+class TestSecondesIncompletesHTTP(unittest.TestCase):
+    def test_fichier_court_classe_comme_une_fenetre_tronquee(self):
+        import contextlib
+        debut = datetime(2026, 10, 1, 20, 28)
+        fin = debut + timedelta(seconds=60)
+        frames = _frames_variees(3, 0)                  # seulement 3 s sur 60 demandées
+
+        @contextlib.contextmanager
+        def faux_contexte(d, f, **kw):
+            yield "/tmp/factice.dav", 70000
+
+        with mock.patch.object(dma.lecture_dvr, "fenetre_telechargee", faux_contexte), \
+                mock.patch.object(dma.lecture_dvr, "ouvrir_fichier",
+                                  return_value=(FakeCapture(frames), "/tmp/factice.dav")):
+            m1, m2, stats = dma.analyser_fenetre_http(debut, fin, calculer_machine2=True)
+        self.assertLess(stats["images"], stats["total"])
+        # Minute incomplète (3 s lues) : classer() la rejettera (< 30 s).
+        self.assertEqual(dma.classer(m1), [])
+
+    def test_fichier_illisible_leve_pour_secours(self):
+        import contextlib
+        debut = datetime(2026, 10, 1, 20, 28)
+        fin = debut + timedelta(seconds=5)
+
+        @contextlib.contextmanager
+        def faux_contexte(d, f, **kw):
+            yield "/tmp/factice.dav", 70000
+
+        with mock.patch.object(dma.lecture_dvr, "fenetre_telechargee", faux_contexte), \
+                mock.patch.object(dma.lecture_dvr, "ouvrir_fichier",
+                                  return_value=(FakeCapture([]), "/tmp/factice.dav")):
+            with self.assertRaises(dma.lecture_dvr.ErreurLectureFichier):
+                dma.analyser_fenetre_http(debut, fin, calculer_machine2=True)
+
+
+class TestComparerLectures(unittest.TestCase):
+    def test_equivalent_si_memes_etats_et_ecart_faible(self):
+        http = [{"minute": "2026-10-01T20:28", "etat": "marche", "pourcentage": 100.0, "secondes_analysees": 59},
+                {"minute": "2026-10-01T20:30", "etat": "arret", "pourcentage": 20.0, "secondes_analysees": 59}]
+        rtsp = [{"minute": "2026-10-01T20:28", "etat": "marche", "pourcentage": 98.0, "secondes_analysees": 59},
+                {"minute": "2026-10-01T20:30", "etat": "arret", "pourcentage": 22.0, "secondes_analysees": 59}]
+        equivalent, details = dma.comparer_minutes(http, rtsp)
+        self.assertTrue(equivalent)
+        self.assertTrue(all(d[-1] for d in details))
+
+    def test_non_equivalent_si_etat_differe(self):
+        http = [{"minute": "2026-10-01T20:30", "etat": "marche", "pourcentage": 41.0, "secondes_analysees": 59}]
+        rtsp = [{"minute": "2026-10-01T20:30", "etat": "arret", "pourcentage": 39.0, "secondes_analysees": 59}]
+        equivalent, _ = dma.comparer_minutes(http, rtsp)
+        self.assertFalse(equivalent)
+
+    def test_non_equivalent_si_minute_manquante_d_un_cote(self):
+        http = [{"minute": "2026-10-01T20:28", "etat": "arret", "pourcentage": 0.0, "secondes_analysees": 59}]
+        equivalent, _ = dma.comparer_minutes(http, [])
+        self.assertFalse(equivalent)
+
+
+class TestBudgetRattrapageSousTimeout(unittest.TestCase):
+    def test_budget_strictement_sous_timeout_systemd(self):
+        # TimeoutStartSec=480 dans deploy/suivi-machine-etat.service.
+        self.assertLess(dma.BUDGET_RATTRAPAGE_S, 480)
+        self.assertGreater(dma.BUDGET_RATTRAPAGE_S, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

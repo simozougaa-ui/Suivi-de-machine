@@ -58,17 +58,35 @@ class Resultat:
         self.ouverture_s = float("nan")
         self.erreur = None
         self.note = None
+        # Méthodes sans images décodées (téléchargement HTTP) : facteur par
+        # rapport au temps réel = durée de vidéo / durée de transfert.
+        self.facteur_temps_reel = None
 
     @property
     def ips(self):
         return self.images / self.duree_s if (self.duree_s > 0 and not self.erreur) else 0.0
 
+    def vitesse_relative(self):
+        """Rapport au temps réel, comparable entre méthodes à images (ips /
+        15) et méthode HTTP (facteur de téléchargement). 0 si échec/non
+        mesurable — ne peut donc jamais être désignée « meilleure »."""
+        if self.erreur:
+            return 0.0
+        if self.facteur_temps_reel is not None:
+            return self.facteur_temps_reel
+        return self.ips / FPS_CIBLE if self.ips else 0.0
+
     def verdict(self):
         if self.erreur:
             return f"échec : {self.erreur}"
-        if self.ips > FPS_CIBLE:
+        rel = self.vitesse_relative()
+        if rel > 1.0:
+            if self.facteur_temps_reel is not None:
+                return f"{rel:.0f}x plus rapide que le temps réel"
             return "plus rapide que le temps réel"
-        return "temps réel"
+        if rel > 0:
+            return "temps réel"
+        return "pas de vitesse mesurable"
 
 
 def masquer(texte, mots_secrets=()):
@@ -162,7 +180,13 @@ def _mesure_rtsp(nom, debut, fin, duree, delai_max, options_ffmpeg=None):
             r.images, r.duree_s, r.ouverture_s, interrompu = mesurer_flux(
                 lambda: open_stream(url), total, delai_max)
             if interrompu and r.images < total:
-                r.note = (r.note + " ; " if r.note else "") + "arrêté au délai maxi"
+                # Lecture coupée au délai maxi : le temps mesuré n'est PAS celui
+                # d'une fenêtre complète (le DVR a juste cessé d'envoyer puis
+                # OpenCV a attendu son timeout). Les « images/s » qui en
+                # découlent n'ont aucun sens — on marque un échec plutôt que de
+                # présenter une fausse vitesse ou de la désigner « meilleure ».
+                r.erreur = (f"arrêté au délai maxi ({r.images}/{total} images reçues ; "
+                            "vitesse non mesurable)")
         finally:
             if options_ffmpeg is not None:
                 if ancienne is None:
@@ -257,15 +281,20 @@ def _mesure_http(debut, fin, delai_max):
             r.erreur = masquer(exc, _secrets_env())
             return
         r.duree_s = time.monotonic() - t0
+        if r.note == "arrêté au délai maxi":
+            # Transfert coupé avant la fin : le facteur serait faux.
+            r.erreur = "arrêté au délai maxi (téléchargement incomplet)"
+            return
         mo = octets / (1024 * 1024)
         debit = mo / r.duree_s if r.duree_s else 0
+        duree_video = (fin - debut).total_seconds()
+        # Pas d'images décodées ici : la vitesse se mesure en facteur temps
+        # réel = durée de vidéo téléchargée / durée du transfert.
+        r.facteur_temps_reel = duree_video / r.duree_s if r.duree_s else None
         r.note = f"{mo:.1f} Mo en {r.duree_s:.1f} s = {debit:.2f} Mo/s"
-        # Pas d'images décodées : on ne peut pas donner d'img/s fiable, mais
-        # un fichier de N minutes téléchargé en T < N*60 s est « plus rapide
-        # que le temps réel ». On le signale dans la note.
 
     _avec_delai(faire, delai_max, r)
-    # r.images reste 0 : le tableau affichera le débit via la note.
+    # r.images reste 0 : le tableau affiche le facteur via verdict()/note.
     return r
 
 
@@ -330,15 +359,18 @@ def construire_tableau(resultats, duree, timer_actif):
             lignes.append(f"  ({r.note})")
     lignes.append("-" * 44)
 
-    succes = [r for r in resultats if not r.erreur and r.ips > 0]
+    # Meilleure = plus grande vitesse relative au temps réel, parmi les
+    # mesures VALIDES seulement (une lecture coupée au délai a .erreur, donc
+    # vitesse_relative() = 0 et ne peut pas être choisie).
+    succes = [r for r in resultats if r.vitesse_relative() > 0]
     if succes:
-        meilleur = max(succes, key=lambda r: r.ips)
-        secondes_5min = 5 * 60 * FPS_CIBLE / meilleur.ips
-        lignes.append(f"Meilleure : {meilleur.nom} ({meilleur.ips:.1f} img/s).")
+        meilleur = max(succes, key=lambda r: r.vitesse_relative())
+        secondes_5min = 5 * 60 / meilleur.vitesse_relative()
+        lignes.append(f"Meilleure : {meilleur.nom} ({meilleur.verdict()}).")
         lignes.append(f"Fenêtre de 5 min traitée en ~{secondes_5min:.0f} s "
                       f"({'< 300 s, OK' if secondes_5min < 300 else '> 300 s, retard'}).")
     else:
-        lignes.append("Aucune méthode n'a donné d'img/s exploitable (voir ci-dessus).")
+        lignes.append("Aucune méthode n'a donné de vitesse exploitable (voir ci-dessus).")
     return "\n".join(lignes) + "\n"
 
 

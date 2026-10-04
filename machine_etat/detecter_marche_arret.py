@@ -100,6 +100,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 from src.camera_stream import build_rtsp_playback_url, open_stream  # noqa: E402
+from machine_etat import lecture_dvr  # noqa: E402
 
 load_dotenv(os.path.join(ROOT, ".env"))
 
@@ -166,6 +167,15 @@ FICHIER_CURSEUR = os.path.join(ROOT, "machine_etat", "curseur.json")
 # panne) risquerait de se faire tuer par systemd en pleine fenêtre, perdant
 # tout son travail au lieu d'avancer d'un cran sûr.
 PLAFOND_RATTRAPAGE_MINUTES = FENETRE_MINUTES
+
+# Budget de rattrapage par passage (2026-10-04) : avec la lecture HTTP, une
+# fenêtre de 5 min ne coûte plus que le décodage + le calcul (~2 min de CPU
+# observées) ; un passage peut donc enchaîner plusieurs fenêtres pour
+# résorber le retard, tant qu'il reste SOUS ce budget. 300 s laisse une
+# marge nette sous TimeoutStartSec=480 s (voir deploy/suivi-machine-etat.service)
+# pour la fenêtre en cours + l'envoi. En lecture RTSP ce budget est ignoré
+# (un seul passage par fenêtre, comme avant : enchaîner dépasserait le délai).
+BUDGET_RATTRAPAGE_S = 300
 
 # Verrou de passage (2026-10-03) : pris par tout passage AUTOMATIQUE et par
 # --repartir-a-jour, les deux seuls à écrire les curseurs. flock() est libéré
@@ -395,18 +405,21 @@ def amplitude_zone_m2(images_grises_floutees, zone=ZONE_M2, seuil=SEUIL_AMPLITUD
     return np.count_nonzero(amplitude > seuil) / amplitude.size
 
 
-def analyser_fenetre(debut, fin, garder_frames=None, calculer_machine2=True):
-    """Lit les enregistrements entre deux instants et classe chaque minute,
-    pour les DEUX machines, en UNE SEULE lecture vidéo.
+def analyser_capture(capture, debut, fin, calculer_machine2=True, garder_frames=None,
+                     sauter=0, t_reference=None):
+    """Cœur de classification, COMMUN à la lecture RTSP et à la lecture d'un
+    fichier téléchargé (voir analyser_fenetre et analyser_fenetre_http) : c'est
+    la garantie que les deux méthodes produisent EXACTEMENT les mêmes minutes.
+    Ne dépend que d'un objet `capture` à la cv2.VideoCapture (read(), grab()).
 
-    Returns:
-        (par_minute_m1, par_minute_m2) — chacun un dict minute (datetime
-        tronqué à la minute) -> (secondes_avec_mouvement, secondes_analysees).
-        par_minute_m2 est vide si `calculer_machine2` est False (aucun calcul
-        machine 2 n'est fait dans ce cas — ni travail ni coût en moins pour
-        rien). Une minute absente d'un dict n'a tout simplement pas été lue
-        pour cette machine : elle ne sera PAS envoyée, et l'application
-        l'affichera comme « non mesurée » — jamais comme un arrêt.
+    Mappe l'image d'index 0 sur `debut` (instant = debut + index/pas), comme
+    la relecture RTSP qui démarre à starttime. `sauter` saute (grab(), sans
+    décoder) ce nombre d'images AVANT de commencer : sert au rognage d'un
+    éventuel décalage constant mesuré sur un fichier (voir
+    DVR_HTTP_IMAGES_AVANCE), sans jamais changer le cas RTSP (sauter=0).
+
+    Returns: (par_minute_m1, par_minute_m2, images_classees, total_images,
+    attente_premiere_s).
     """
     duree = int((fin - debut).total_seconds())
     if duree <= 0:
@@ -431,80 +444,175 @@ def analyser_fenetre(debut, fin, garder_frames=None, calculer_machine2=True):
     if garder_frames:
         os.makedirs(garder_frames, exist_ok=True)
 
-    t_ouverture = time.monotonic()
-    t_premiere_image = None
-    capture = open_stream(build_rtsp_playback_url(debut, fin))
-    try:
-        while index < total_images:
-            if not calculer_machine2 and index % pas != 0:
-                # Machine 2 désactivée : on peut se permettre de ne décoder
-                # qu'1 image/15 (voir grab() plus bas) comme avant son ajout.
-                # Avec machine 2 active, TOUTES les images sont nécessaires
-                # (elle travaille à pleine cadence) : cette branche ne sert
-                # alors jamais (voir NOTES-SESSION.md, correctif 2026-10-01
-                # ter — le gain de grab() disparaît quand machine 2 tourne,
-                # c'est un compromis assumé, pas un oubli).
-                ok = capture.grab()
-                if not ok:
-                    break
-                index += 1
-                continue
+    for _ in range(max(0, sauter)):
+        if not capture.grab():
+            break
 
-            ok, frame = capture.read()
+    t_debut = t_reference if t_reference is not None else time.monotonic()
+    t_premiere_image = None
+    while index < total_images:
+        if not calculer_machine2 and index % pas != 0:
+            # Machine 2 désactivée : on peut se permettre de ne décoder
+            # qu'1 image/15 (voir grab() plus bas) comme avant son ajout.
+            # Avec machine 2 active, TOUTES les images sont nécessaires
+            # (elle travaille à pleine cadence) : cette branche ne sert
+            # alors jamais (voir NOTES-SESSION.md, correctif 2026-10-01
+            # ter — le gain de grab() disparaît quand machine 2 tourne,
+            # c'est un compromis assumé, pas un oubli).
+            ok = capture.grab()
             if not ok:
                 break
-            if t_premiere_image is None:
-                t_premiere_image = time.monotonic()
-
-            if calculer_machine2:
-                tampon_m2.append(gris_floute_m2(frame))
-
-            if index % pas == 0:
-                instant = debut + timedelta(seconds=gardees)
-                courante_m1 = zone_grise(frame)
-
-                if garder_frames:
-                    cv2.imwrite(
-                        os.path.join(garder_frames, instant.strftime("frame_%H%M%S.jpg")),
-                        frame, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
-
-                if precedente_m1 is not None:
-                    minute = instant.replace(second=0, microsecond=0)
-                    avec, total = par_minute_m1.get(minute, (0, 0))
-                    if seconde_avec_mouvement(precedente_m1, courante_m1):
-                        avec += 1
-                    par_minute_m1[minute] = (avec, total + 1)
-
-                precedente_m1 = courante_m1
-                gardees += 1
-
-            if calculer_machine2 and len(tampon_m2) == pas:
-                instant_seconde = debut + timedelta(seconds=(index // pas))
-                fraction = amplitude_zone_m2(tampon_m2)
-                minute = instant_seconde.replace(second=0, microsecond=0)
-                avec, total = par_minute_m2.get(minute, (0, 0))
-                if fraction > SEUIL_FRACTION_M2:
-                    avec += 1
-                par_minute_m2[minute] = (avec, total + 1)
-                tampon_m2 = []
-
             index += 1
+            continue
+
+        ok, frame = capture.read()
+        if not ok:
+            break
+        if t_premiere_image is None:
+            t_premiere_image = time.monotonic()
+
+        if calculer_machine2:
+            tampon_m2.append(gris_floute_m2(frame))
+
+        if index % pas == 0:
+            instant = debut + timedelta(seconds=gardees)
+            courante_m1 = zone_grise(frame)
+
+            if garder_frames:
+                cv2.imwrite(
+                    os.path.join(garder_frames, instant.strftime("frame_%H%M%S.jpg")),
+                    frame, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
+
+            if precedente_m1 is not None:
+                minute = instant.replace(second=0, microsecond=0)
+                avec, total = par_minute_m1.get(minute, (0, 0))
+                if seconde_avec_mouvement(precedente_m1, courante_m1):
+                    avec += 1
+                par_minute_m1[minute] = (avec, total + 1)
+
+            precedente_m1 = courante_m1
+            gardees += 1
+
+        if calculer_machine2 and len(tampon_m2) == pas:
+            instant_seconde = debut + timedelta(seconds=(index // pas))
+            fraction = amplitude_zone_m2(tampon_m2)
+            minute = instant_seconde.replace(second=0, microsecond=0)
+            avec, total = par_minute_m2.get(minute, (0, 0))
+            if fraction > SEUIL_FRACTION_M2:
+                avec += 1
+            par_minute_m2[minute] = (avec, total + 1)
+            tampon_m2 = []
+
+        index += 1
+
+    attente_premiere = (t_premiere_image - t_debut) if t_premiere_image else float("nan")
+    return par_minute_m1, par_minute_m2, index, total_images, attente_premiere
+
+
+def analyser_fenetre(debut, fin, garder_frames=None, calculer_machine2=True):
+    """Lecture RTSP (méthode historique, inchangée) : ouvre le flux de
+    relecture et classe chaque minute pour les deux machines.
+
+    Returns (par_minute_m1, par_minute_m2). Une minute absente d'un dict n'a
+    pas été lue pour cette machine : elle ne sera PAS envoyée, et
+    l'application l'affichera « non mesurée » — jamais comme un arrêt.
+    """
+    duree = int((fin - debut).total_seconds())
+    t_ouverture = time.monotonic()
+    capture = open_stream(build_rtsp_playback_url(debut, fin))
+    try:
+        m1, m2, index, total, attente = analyser_capture(
+            capture, debut, fin, calculer_machine2, garder_frames, t_reference=t_ouverture)
     finally:
         capture.release()
 
     duree_lecture = time.monotonic() - t_ouverture
-    if index < total_images:
+    if index < total:
         logger.warning(
             "Flux terminé avant la fin de la fenêtre : %d/%d images reçues "
             "(moins de %d images/s envoyées par le DVR, ou coupure).",
-            index, total_images, pas)
-    attente_premiere = (t_premiere_image - t_ouverture) if t_premiere_image else float("nan")
+            index, total, max(1, int(round(FPS_SUPPOSE))))
     logger.info(
-        "Lecture : %d images en %.1f s pour %d s de vidéo "
+        "Lecture RTSP : %d images en %.1f s pour %d s de vidéo "
         "(ouverture du flux + 1re image : %.1f s).",
-        index, duree_lecture, duree, attente_premiere)
+        index, duree_lecture, duree, attente)
+    return m1, m2
 
-    return par_minute_m1, par_minute_m2
+
+def analyser_fenetre_http(debut, fin, garder_frames=None, calculer_machine2=True):
+    """Lecture par TÉLÉCHARGEMENT HTTP (voir machine_etat/lecture_dvr.py) :
+    télécharge la fenêtre dans un fichier temporaire, la lit localement avec
+    le MÊME cœur que la lecture RTSP (analyser_capture), puis supprime le
+    fichier. Lève lecture_dvr.ErreurTelechargement ou .ErreurLectureFichier
+    si quoi que ce soit échoue, pour que l'appelant retombe sur RTSP.
+
+    Returns (par_minute_m1, par_minute_m2, stats) où stats contient octets,
+    duree_telechargement_s, duree_lecture_s, images, total_images.
+    """
+    duree = int((fin - debut).total_seconds())
+    # Décalage constant à rogner, mesuré par --comparer-lectures si besoin.
+    # 0 par défaut : l'image 0 du fichier est mappée sur `debut`, exactement
+    # comme la relecture RTSP. Les deux servent la même piste d'enregistrement
+    # et sont supposées démarrer au même instant ; une valeur non nulle ici
+    # corrige un décalage constant sans toucher au code.
+    avance = int(os.getenv("DVR_HTTP_IMAGES_AVANCE") or 0)
+
+    t0 = time.monotonic()
+    with lecture_dvr.fenetre_telechargee(debut, fin) as (chemin, octets):
+        t_dl = time.monotonic() - t0
+        capture, chemin_lu = lecture_dvr.ouvrir_fichier(chemin)
+        t_lecture = time.monotonic()
+        try:
+            m1, m2, index, total, _ = analyser_capture(
+                capture, debut, fin, calculer_machine2, garder_frames,
+                sauter=avance, t_reference=t_lecture)
+        finally:
+            capture.release()
+            if chemin_lu != chemin:
+                lecture_dvr._supprimer(chemin_lu)   # fichier remuxé ffmpeg
+        duree_lecture = time.monotonic() - t_lecture
+
+    if index == 0:
+        raise lecture_dvr.ErreurLectureFichier(
+            "aucune image décodée du fichier téléchargé (format non lu ?)")
+    if index < total:
+        logger.warning(
+            "Fichier plus court que la fenêtre : %d/%d images "
+            "(trou d'enregistrement ou téléchargement partiel).", index, total)
+
+    stats = {"octets": octets, "t_dl": t_dl, "t_lecture": duree_lecture,
+             "images": index, "total": total}
+    return m1, m2, stats
+
+
+def config_lecture():
+    """Méthode de lecture du DVR : « http » ou « rtsp » (défaut « rtsp », donc
+    AUCUN changement tant que LECTURE_DVR n'est pas mis à http dans .env)."""
+    valeur = (os.getenv("LECTURE_DVR") or "rtsp").strip().lower()
+    return "http" if valeur == "http" else "rtsp"
+
+
+def lire_analyser(debut, fin, methode, garder_frames=None, calculer_machine2=True):
+    """Lit et classe une fenêtre par `methode` (« http » ou « rtsp »). En
+    http, retombe automatiquement sur RTSP pour CETTE fenêtre si le
+    téléchargement ou la lecture du fichier échoue (journalisé). Renvoie
+    (par_minute_m1, par_minute_m2, methode_utilisee)."""
+    if methode == "http":
+        try:
+            m1, m2, stats = analyser_fenetre_http(debut, fin, garder_frames, calculer_machine2)
+            logger.info(
+                "Lecture HTTP : %.1f Mo en %.1f s + lecture %.1f s "
+                "(%d/%d images).",
+                stats["octets"] / (1024 * 1024), stats["t_dl"], stats["t_lecture"],
+                stats["images"], stats["total"])
+            return m1, m2, "http"
+        except (lecture_dvr.ErreurTelechargement, lecture_dvr.ErreurLectureFichier) as e:
+            logger.warning("Lecture HTTP échouée (%s) — secours RTSP pour cette fenêtre.",
+                           lecture_dvr.masquer(e))
+            m1, m2 = analyser_fenetre(debut, fin, garder_frames, calculer_machine2)
+            return m1, m2, "secours-rtsp"
+    m1, m2 = analyser_fenetre(debut, fin, garder_frames, calculer_machine2)
+    return m1, m2, "rtsp"
 
 
 def classer(par_minute):
@@ -681,6 +789,72 @@ def traiter_envoi_machine(machine_id, lignes, fin_fenetre, url, jeton, mode_auto
     return True
 
 
+TOLERANCE_POURCENT_COMPARAISON = 5.0
+
+
+def comparer_minutes(lignes_http, lignes_rtsp, tolerance=TOLERANCE_POURCENT_COMPARAISON):
+    """Compare deux listes de minutes classées (même machine, mêmes minutes).
+    Renvoie (equivalent, details) où details est une liste de tuples
+    (minute, etat_http, pct_http, etat_rtsp, pct_rtsp, ok). Équivalent = même
+    état partout ET écart de pourcentage <= tolerance sur chaque minute
+    présente des deux côtés ; une minute présente d'un seul côté est un écart."""
+    par_http = {l["minute"]: l for l in lignes_http}
+    par_rtsp = {l["minute"]: l for l in lignes_rtsp}
+    details = []
+    equivalent = True
+    for minute in sorted(set(par_http) | set(par_rtsp)):
+        h, r = par_http.get(minute), par_rtsp.get(minute)
+        if h is None or r is None:
+            equivalent = False
+            details.append((minute,
+                            h["etat"] if h else "-", h["pourcentage"] if h else float("nan"),
+                            r["etat"] if r else "-", r["pourcentage"] if r else float("nan"),
+                            False))
+            continue
+        ok = (h["etat"] == r["etat"]) and (abs(h["pourcentage"] - r["pourcentage"]) <= tolerance)
+        equivalent = equivalent and ok
+        details.append((minute, h["etat"], h["pourcentage"], r["etat"], r["pourcentage"], ok))
+    return equivalent, details
+
+
+def comparer_lectures(debut, fin, machine1_id, machine2_active, machine2_id):
+    """Analyse la même fenêtre par HTTP puis par RTSP et affiche, par machine
+    et par minute, l'état et le pourcentage des deux méthodes avec un verdict
+    d'équivalence. N'envoie rien, n'écrit aucun curseur."""
+    logger.info("Comparaison HTTP vs RTSP sur %s -> %s",
+                debut.strftime("%Y-%m-%d %H:%M"), fin.strftime("%H:%M"))
+    try:
+        m1_http, m2_http, _ = analyser_fenetre_http(debut, fin, calculer_machine2=machine2_active)
+    except (lecture_dvr.ErreurTelechargement, lecture_dvr.ErreurLectureFichier) as e:
+        print("Lecture HTTP impossible :", lecture_dvr.masquer(e))
+        print("La bascule LECTURE_DVR=http ne doit PAS être activée tant que ceci échoue.")
+        return 1
+    m1_rtsp, m2_rtsp = analyser_fenetre(debut, fin, calculer_machine2=machine2_active)
+
+    tout_ok = True
+    machines = [("machine-1 (" + machine1_id + ")", classer(m1_http), classer(m1_rtsp))]
+    if machine2_active:
+        machines.append(("machine-2 (" + machine2_id + ")", classer(m2_http), classer(m2_rtsp)))
+
+    lignes = [f"Comparaison HTTP vs RTSP, {debut:%Y-%m-%d %H:%M} -> {fin:%H:%M}",
+              f"(tolérance : même état + écart <= {TOLERANCE_POURCENT_COMPARAISON:.0f} pts)", ""]
+    for nom, lignes_http, lignes_rtsp in machines:
+        equivalent, details = comparer_minutes(lignes_http, lignes_rtsp)
+        tout_ok = tout_ok and equivalent
+        lignes.append(f"=== {nom} ===")
+        lignes.append("minute  http        rtsp")
+        for minute, eh, ph, er, pr, ok in details:
+            hhmm = minute[11:]
+            marque = "" if ok else "  <- DIFF"
+            lignes.append(f"{hhmm}  {eh:<6}{ph:5.1f}  {er:<6}{pr:5.1f}{marque}")
+        lignes.append("équivalent" if equivalent else "NON équivalent")
+        lignes.append("")
+    lignes.append("VERDICT : équivalent, HTTP utilisable." if tout_ok
+                  else "VERDICT : différences détectées, garder RTSP.")
+    print("\n".join(lignes))
+    return 0 if tout_ok else 2
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -694,6 +868,9 @@ def main(argv=None):
     ap.add_argument("--repartir-a-jour", action="store_true",
                     help="place les curseurs des deux machines à maintenant - 5 min puis quitte, "
                          "sans rien analyser ni envoyer (les minutes sautées restent « non mesurées »)")
+    ap.add_argument("--comparer-lectures", action="store_true",
+                    help="analyse la fenêtre --date/--debut/--fin par HTTP puis RTSP et compare "
+                         "les minutes des deux (validation, n'envoie rien, n'écrit aucun curseur)")
     ap.add_argument("--verbeux", action="store_true")
     args = ap.parse_args(argv)
 
@@ -701,8 +878,19 @@ def main(argv=None):
         level=logging.DEBUG if args.verbeux else logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s")
 
+    # Restes d'un passage tué avant son nettoyage (fichiers temporaires DVR).
+    lecture_dvr.nettoyer_restes()
+
     machine2_active, machine2_id = config_machine2()
     machine1_id = id_machine1()
+
+    if args.comparer_lectures:
+        if not (args.date and args.debut and args.fin) or args.sans_envoi or args.repartir_a_jour:
+            ap.error("--comparer-lectures exige --date, --debut et --fin, et s'utilise seul.")
+        jour = datetime.strptime(args.date, "%Y-%m-%d").date()
+        debut = datetime.combine(jour, datetime.strptime(args.debut, "%H:%M").time())
+        fin = datetime.combine(jour, datetime.strptime(args.fin, "%H:%M").time())
+        return comparer_lectures(debut, fin, machine1_id, machine2_active, machine2_id)
 
     # Mode automatique (timer systemd) = ni --date ni --debut ni --fin : seul
     # ce mode lit/écrit les curseurs de reprise (voir FICHIER_CURSEUR) — un
@@ -752,33 +940,71 @@ def main(argv=None):
 
 
 def _passage(ap, args, mode_auto, machine1_id, machine2_active, machine2_id, t_passage):
-    """Un passage complet (fenêtre, lecture, classement, envoi, curseurs),
-    appelé par main() une fois le verrou pris en mode automatique."""
+    """Un passage complet, appelé par main() une fois le verrou pris en mode
+    automatique. En mode manuel (--date/--debut/--fin) : une seule fenêtre.
+    En mode automatique avec lecture HTTP : enchaîne plusieurs fenêtres tant
+    qu'il reste du retard et que le budget de temps le permet (rattrapage)."""
+    methode = config_lecture()
+
     if args.date and args.debut and args.fin:
         jour = datetime.strptime(args.date, "%Y-%m-%d").date()
         debut = datetime.combine(jour, datetime.strptime(args.debut, "%H:%M").time())
         fin = datetime.combine(jour, datetime.strptime(args.fin, "%H:%M").time())
-        retard_restant = None
-    elif args.date or args.debut or args.fin:
+        ok, _ = _traiter_une_fenetre(debut, fin, methode, mode_auto, machine1_id,
+                                     machine2_active, machine2_id, args)
+        signaler_si_trop_long(time.monotonic() - t_passage, debut, fin)
+        return 0 if ok else 1
+    if args.date or args.debut or args.fin:
         ap.error("--date, --debut et --fin vont ensemble.")
-    else:
-        machines_actives = [machine1_id] + ([machine2_id] if machine2_active else [])
+
+    machines_actives = [machine1_id] + ([machine2_id] if machine2_active else [])
+    budget = BUDGET_RATTRAPAGE_S if methode == "http" else 0
+    premiere = True
+    while True:
         debut, fin, retard_restant = fenetre_a_analyser(machines_actives)
         if debut is None:
-            logger.info("Rien de nouveau à analyser pour l'instant (déjà à jour avec le DVR).")
-            return 0
+            if premiere:
+                logger.info("Rien de nouveau à analyser pour l'instant (déjà à jour avec le DVR).")
+            break
+        premiere = False
+        ok, _ = _traiter_une_fenetre(debut, fin, methode, mode_auto, machine1_id,
+                                     machine2_active, machine2_id, args)
+        if not ok:
+            break   # échec d'envoi : le curseur n'a pas avancé, on réessaiera au prochain passage
+        if retard_restant and retard_restant > timedelta(0):
+            # Lecture HTTP rapide : on continue dans CE passage tant que le
+            # budget tient, pour résorber le retard sans attendre 5 min à
+            # chaque fenêtre. En RTSP (budget 0), on s'arrête après une
+            # fenêtre (enchaîner dépasserait TimeoutStartSec).
+            if time.monotonic() - t_passage >= budget:
+                logger.info(
+                    "Budget de rattrapage atteint (%d s) : %s de retard restent, "
+                    "repris au prochain passage.", budget, retard_restant)
+                break
+            continue
+        break
 
-    logger.info("Analyse des enregistrements de %s à %s (machine 2 %s)",
-                debut.strftime("%Y-%m-%d %H:%M"), fin.strftime("%H:%M"),
+    signaler_si_trop_long(time.monotonic() - t_passage, debut, fin)
+    return 0
+
+
+def _traiter_une_fenetre(debut, fin, methode, mode_auto, machine1_id,
+                         machine2_active, machine2_id, args):
+    """Lit, classe, journalise et (sauf --sans-envoi) envoie UNE fenêtre.
+    Avance les curseurs via traiter_envoi_machine (après envoi réussi
+    seulement). Renvoie (succes, nb_minutes_classees)."""
+    logger.info("Analyse des enregistrements de %s à %s (lecture %s, machine 2 %s)",
+                debut.strftime("%Y-%m-%d %H:%M"), fin.strftime("%H:%M"), methode,
                 "active" if machine2_active else "désactivée")
 
     debut_calcul = time.time()
-    par_minute_m1, par_minute_m2 = analyser_fenetre(
-        debut, fin, args.garder_frames, calculer_machine2=machine2_active)
+    par_minute_m1, par_minute_m2, methode_utilisee = lire_analyser(
+        debut, fin, methode, args.garder_frames, calculer_machine2=machine2_active)
     duree_calcul = time.time() - debut_calcul
 
     lignes_m1 = classer(par_minute_m1)
-    logger.info("Machine 1 : %d minute(s) classée(s) en %.1f s", len(lignes_m1), duree_calcul)
+    logger.info("Machine 1 : %d minute(s) classée(s) en %.1f s (lecture %s)",
+                len(lignes_m1), duree_calcul, methode_utilisee)
     for l in lignes_m1:
         logger.info("  %s  %s  %-6s  %5.1f %% de mouvement (%d s)",
                     machine1_id, l["minute"], l["etat"], l["pourcentage"], l["secondes_analysees"])
@@ -791,14 +1017,8 @@ def _passage(ap, args, mode_auto, machine1_id, machine2_active, machine2_id, t_p
             logger.info("  %s  %s  %-6s  %5.1f %% de secondes en mouvement (%d s)",
                         machine2_id, l["minute"], l["etat"], l["pourcentage"], l["secondes_analysees"])
 
-    if retard_restant and retard_restant > timedelta(0):
-        logger.warning(
-            "Fenêtre traitée, mais %s de retard restent à rattraper "
-            "(repris automatiquement au prochain passage).", retard_restant)
-
     if args.sans_envoi:
-        signaler_si_trop_long(time.monotonic() - t_passage, debut, fin)
-        return 0
+        return True, len(lignes_m1) + len(lignes_m2)
 
     url, jeton = config_api()
     # La file d'abord : sans ça, un long incident remettrait les minutes dans
@@ -828,8 +1048,7 @@ def _passage(ap, args, mode_auto, machine1_id, machine2_active, machine2_id, t_p
         ]
         reussite_m2 = traiter_envoi_machine(machine2_id, lignes_m2_a_envoyer, fin, url, jeton, mode_auto)
 
-    signaler_si_trop_long(time.monotonic() - t_passage, debut, fin)
-    return 0 if (reussite_m1 and reussite_m2) else 1
+    return (reussite_m1 and reussite_m2), len(lignes_m1) + len(lignes_m2)
 
 
 if __name__ == "__main__":

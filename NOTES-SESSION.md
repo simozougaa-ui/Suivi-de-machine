@@ -2939,3 +2939,29 @@ Correction :
 - le message du mode automatique dit maintenant « non lue pour l'instant ».
 
 Tests : 120/120 (+1).
+
+### Complément (20:35) : fichier téléchargé illisible, retenté une fois
+
+Journal du 15/10 à 20:26:28 : le fichier de la fenêtre 09:03 → 09:08 n'a
+pas pu être lu (« OpenCV ne sait pas lire le fichier et ffmpeg est
+absent »). La même fenêtre est passée normalement à 20:30. À ce moment-là,
+la récupération manuelle et la détection automatique téléchargeaient en
+même temps. Ce n'était donc pas un DVR figé, mais le raté avait armé le
+disjoncteur. Un 2e raté aurait redémarré le DVR pour rien.
+
+Correction :
+- un fichier illisible est retéléchargé UNE fois tout de suite ;
+- s'il est encore illisible, c'est un échec comme avant ;
+- les autres erreurs ne sont pas retentées (DVR qui ne répond pas : 30 s
+  déjà perdues ; trou d'enregistrement : réponse nette du DVR).
+
+Recommandé sur le Jetson : installer ffmpeg (`sudo apt install -y ffmpeg`).
+`ouvrir_fichier` s'en sert pour remettre en forme (remuxer) un fichier
+qu'OpenCV n'ouvre pas.
+
+Conseil d'usage : ne pas lancer de récupération manuelle pendant un
+rattrapage automatique. Les deux téléchargent en même temps sur le même
+DVR.
+
+Tests : 123/123 (+3 : raté isolé retenté sans compter comme panne, deux
+ratés = échec, DVR muet non retenté).

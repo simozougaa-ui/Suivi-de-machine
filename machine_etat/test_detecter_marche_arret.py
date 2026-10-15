@@ -1844,6 +1844,49 @@ class TestManuelPendantRedemarrage(_AvecDisjoncteurPropre):
         self.assertIn("Relancer CETTE MÊME commande", "\n".join(journal.output))
 
 
+class TestFichierIllisibleRetente(_AvecHistoriqueVide):
+    debut = datetime(2026, 10, 15, 9, 3)
+    fin = debut + timedelta(seconds=2)
+
+    def _ok(self, d, f, garder_frames=None, calculer_machine2=True):
+        m1, m2, *_ = dma.analyser_capture(FakeCapture(_frames_variees(2, 0)), d, f, calculer_machine2)
+        return m1, m2, {"octets": 1, "t_dl": 0.1, "t_lecture": 0.1, "images": 30, "total": 30}
+
+    def test_un_fichier_illisible_isole_est_retente_sans_compter_comme_panne(self):
+        appels = [dma.lecture_dvr.ErreurLectureFichier("ffmpeg est absent"), None]
+
+        def http(*a, **k):
+            e = appels.pop(0)
+            if e:
+                raise e
+            return self._ok(*a, **k)
+
+        with mock.patch.object(dma, "analyser_fenetre_http", side_effect=http), \
+                self.assertLogs("machine_etat", level="WARNING"):
+            _, _, methode = dma.lire_analyser(self.debut, self.fin, "http")
+        self.assertEqual(methode, "http")
+        self.assertIsNone(dma.lecture_dvr._lire_etat_disjoncteur())
+
+    def test_deux_fois_illisible_reste_un_echec(self):
+        rtsp = mock.MagicMock(return_value=({}, {}))
+        with mock.patch.object(dma, "analyser_fenetre_http",
+                               side_effect=dma.lecture_dvr.ErreurLectureFichier("illisible")) as http, \
+                mock.patch.object(dma, "analyser_fenetre", rtsp), \
+                self.assertLogs("machine_etat", level="WARNING"):
+            _, _, methode = dma.lire_analyser(self.debut, self.fin, "http", t_passage=time.monotonic())
+        self.assertEqual(http.call_count, 2)
+        self.assertEqual(methode, "secours-rtsp")
+        self.assertEqual(dma.lecture_dvr._lire_etat_disjoncteur()["echecs"], 1)
+
+    def test_dvr_qui_ne_repond_pas_n_est_pas_retente(self):
+        with mock.patch.object(dma, "analyser_fenetre_http",
+                               side_effect=dma.lecture_dvr.ErreurTelechargement("Read timed out")) as http, \
+                mock.patch.object(dma, "analyser_fenetre", return_value=({}, {})), \
+                self.assertLogs("machine_etat", level="WARNING"):
+            dma.lire_analyser(self.debut, self.fin, "http", t_passage=time.monotonic())
+        self.assertEqual(http.call_count, 1)
+
+
 class TestUnitesRedemarrageDVR(unittest.TestCase):
     def test_python_jamais_en_root_et_detection_relancee(self):
         service = _lire_unite("suivi-dvr-redemarrage.service")

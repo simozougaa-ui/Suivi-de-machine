@@ -687,7 +687,7 @@ def lire_analyser(debut, fin, methode, garder_frames=None, calculer_machine2=Tru
             methode_rtsp = "rtsp-http-en-pause"
         else:
             try:
-                m1, m2, stats = analyser_fenetre_http(debut, fin, garder_frames, calculer_machine2)
+                m1, m2, stats = _http_avec_relecture(debut, fin, garder_frames, calculer_machine2)
                 logger.info(
                     "Lecture HTTP : %.1f Mo en %.1f s + lecture %.1f s "
                     "(%d/%d images).",
@@ -743,6 +743,21 @@ def lire_analyser(debut, fin, methode, garder_frames=None, calculer_machine2=Tru
             lecture_dvr.masquer(e), debut.strftime("%H:%M"), fin.strftime("%H:%M"))
         return None, None, "abandon"
     return m1, m2, methode_rtsp
+
+
+def _http_avec_relecture(debut, fin, garder_frames, calculer_machine2):
+    """analyser_fenetre_http, retentée UNE fois tout de suite si le fichier
+    téléchargé est illisible. 15/10 à 20:26 : un fichier illisible (lecture
+    manuelle et automatique en même temps), alors que la même fenêtre passait
+    à 20:30. C'est un raté du fichier, pas un DVR figé : sans ce nouvel essai,
+    il comptait pour le redémarrage automatique du DVR. Les autres erreurs
+    (DVR qui ne répond pas, trou d'enregistrement) ne sont pas retentées ici."""
+    try:
+        return analyser_fenetre_http(debut, fin, garder_frames, calculer_machine2)
+    except lecture_dvr.ErreurLectureFichier as e:
+        logger.warning("Fichier téléchargé illisible (%s) : nouveau téléchargement.",
+                       lecture_dvr.masquer(e))
+        return analyser_fenetre_http(debut, fin, garder_frames, calculer_machine2)
 
 
 def redemarrage_automatique(etat, cause):

@@ -609,6 +609,46 @@ def temps_rtsp_suffisant(t_passage, debut, fin, horloge=time.monotonic):
     return (horloge() - t_passage) + besoin < TIMEOUT_SERVICE_S
 
 
+# Trou d'enregistrement : la fenêtre n'existe pas sur le DVR (qui marche) —
+# courant coupé, DVR éteint (15/10 : rien d'enregistré de ~08:10 à ~08:50).
+# Chaque minute est envoyée avec l'état « coupure » : l'application l'affiche
+# EN HAUT de la page, en rouge (demande du patron : une coupure de courant
+# n'est jamais normale, elle peut cacher un vol). Le curseur avance et le
+# passage continue : un trou de plusieurs heures est traversé en quelques
+# secondes au lieu de bloquer la détection.
+SANS_ENREGISTREMENT = "sans-enregistrement"
+ETAT_COUPURE = "coupure"
+
+
+def lignes_coupure(debut, fin):
+    """Une ligne « coupure » par minute de [debut, fin) (fenêtre entière sans
+    enregistrement sur le DVR)."""
+    lignes = []
+    t = debut.replace(second=0, microsecond=0)
+    while t < fin:
+        lignes.append({"minute": t.strftime("%Y-%m-%dT%H:%M"), "etat": ETAT_COUPURE,
+                       "pourcentage": 0.0, "secondes_analysees": 0})
+        t += timedelta(minutes=1)
+    return lignes
+
+# Résultat de la dernière vérification « la vidéo récente se télécharge » :
+# gardé quelques minutes pour ne pas la refaire à chaque fenêtre d'un long
+# trou (instant monotonic du dernier succès).
+_VIDEO_RECENTE_OK_DEPUIS = None
+VALIDITE_VERIF_VIDEO_RECENTE_S = 300
+
+
+def video_recente_ok(horloge=time.monotonic):
+    global _VIDEO_RECENTE_OK_DEPUIS
+    if _VIDEO_RECENTE_OK_DEPUIS is not None \
+            and horloge() - _VIDEO_RECENTE_OK_DEPUIS < VALIDITE_VERIF_VIDEO_RECENTE_S:
+        return True
+    if lecture_dvr.video_recente_disponible():
+        _VIDEO_RECENTE_OK_DEPUIS = horloge()
+        return True
+    return False
+
+
 # Méthodes renvoyées par lire_analyser quand RIEN n'a été lu : la fenêtre
 # est reprise au prochain passage (curseur inchangé). « attente-dvr » est
 # normal (DVR en cours de redémarrage automatique) : pas un échec du passage.
@@ -656,20 +696,35 @@ def lire_analyser(debut, fin, methode, garder_frames=None, calculer_machine2=Tru
                 if lecture_dvr.liberer_disjoncteur():
                     logger.info("Lecture HTTP rétablie : le DVR répond de nouveau.")
                 return m1, m2, "http"
-            except (lecture_dvr.ErreurTelechargement, lecture_dvr.ErreurLectureFichier) as e:
-                cause = lecture_dvr.masquer(e)
-                etat = lecture_dvr.armer_disjoncteur(cause)
-                if etat["echecs"] >= lecture_dvr.ECHECS_AVANT_REDEMARRAGE:
-                    if redemarrage_automatique(etat, cause):
-                        return None, None, "attente-dvr"
-                else:
+            except lecture_dvr.ErreurPasDEnregistrement as e:
+                if video_recente_ok():
+                    if lecture_dvr.liberer_disjoncteur():
+                        logger.info("Lecture HTTP rétablie : le DVR répond de nouveau.")
                     logger.error(
-                        "DVR : le téléchargement HTTP ne répond plus (%s), en panne depuis "
-                        "%s. HTTP mis en pause %d min (lecture RTSP en attendant) ; si "
-                        "le prochain essai échoue aussi, le DVR sera redémarré "
-                        "automatiquement.",
-                        cause, etat["depuis"].strftime("%d/%m %H:%M"), lecture_dvr.PAUSE_HTTP_MIN)
-                methode_rtsp = "secours-rtsp"
+                        "COUPURE D'ENREGISTREMENT : le DVR n'a rien enregistré de %s à %s "
+                        "(%s) alors que la vidéo récente se télécharge — courant coupé ou "
+                        "DVR éteint ? Minutes envoyées comme « coupure » (affichées en "
+                        "haut de l'application).",
+                        debut.strftime("%d/%m %H:%M"), fin.strftime("%H:%M"),
+                        lecture_dvr.masquer(e))
+                    return {}, {}, SANS_ENREGISTREMENT
+                erreur = e      # la vidéo récente échoue aussi : DVR en panne
+            except (lecture_dvr.ErreurTelechargement, lecture_dvr.ErreurLectureFichier) as e:
+                erreur = e
+            # Échec : disjoncteur, puis redémarrage automatique ou lecture RTSP.
+            cause = lecture_dvr.masquer(erreur)
+            etat = lecture_dvr.armer_disjoncteur(cause)
+            if etat["echecs"] >= lecture_dvr.ECHECS_AVANT_REDEMARRAGE:
+                if redemarrage_automatique(etat, cause):
+                    return None, None, "attente-dvr"
+            else:
+                logger.error(
+                    "DVR : le téléchargement HTTP ne répond plus (%s), en panne depuis "
+                    "%s. HTTP mis en pause %d min (lecture RTSP en attendant) ; si "
+                    "le prochain essai échoue aussi, le DVR sera redémarré "
+                    "automatiquement.",
+                    cause, etat["depuis"].strftime("%d/%m %H:%M"), lecture_dvr.PAUSE_HTTP_MIN)
+            methode_rtsp = "secours-rtsp"
     else:
         methode_rtsp = "rtsp"
 
@@ -1123,7 +1178,7 @@ def _passage(ap, args, mode_auto, machine1_id, machine2_active, machine2_id, t_p
         dernier_fin = fin
         if not ok:
             break   # échec d'envoi : le curseur n'a pas avancé, on réessaiera au prochain passage
-        if methode_utilisee != "http":
+        if methode_utilisee not in ("http", SANS_ENREGISTREMENT):
             break   # lecture RTSP (lente) : une seule fenêtre par passage
         if retard_restant and retard_restant > timedelta(0):
             # Lecture HTTP rapide : on continue dans CE passage tant que le
@@ -1163,7 +1218,10 @@ def _traiter_une_fenetre(debut, fin, methode, mode_auto, machine1_id,
     if methode_utilisee in RIEN_LU:
         return False, 0, methode_utilisee
 
-    lignes_m1 = classer(par_minute_m1)
+    if methode_utilisee == SANS_ENREGISTREMENT:
+        lignes_m1 = lignes_coupure(debut, fin)
+    else:
+        lignes_m1 = classer(par_minute_m1)
     logger.info("Machine 1 : %d minute(s) classée(s) en %.1f s (lecture %s)",
                 len(lignes_m1), duree_calcul, methode_utilisee)
     for l in lignes_m1:
@@ -1172,7 +1230,8 @@ def _traiter_une_fenetre(debut, fin, methode, mode_auto, machine1_id,
 
     lignes_m2 = []
     if machine2_active:
-        lignes_m2 = classer(par_minute_m2)
+        lignes_m2 = (lignes_coupure(debut, fin) if methode_utilisee == SANS_ENREGISTREMENT
+                     else classer(par_minute_m2))
         logger.info("Machine 2 (%s) : %d minute(s) classée(s)", machine2_id, len(lignes_m2))
         for l in lignes_m2:
             logger.info("  %s  %s  %-6s  %5.1f %% de secondes en mouvement (%d s)",

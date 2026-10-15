@@ -998,7 +998,14 @@ class TestTelechargementDVR(unittest.TestCase):
         self.assertEqual(self._restes(), [])
 
     def test_http_404_echoue(self):
+        # Depuis le 15/10 au soir : 404 = « aucun enregistrement » (trou), pas une panne.
         session = _faux_session(FauxReponseHTTP([b"x" * 70000], status_code=404))
+        with self.assertRaises(dma.lecture_dvr.ErreurPasDEnregistrement):
+            dma.lecture_dvr.telecharger_fenetre(self.debut, self.fin, tentatives=1, session_get=session)
+        self.assertEqual(self._restes(), [])
+
+    def test_http_500_reste_une_panne(self):
+        session = _faux_session(FauxReponseHTTP([b"x" * 70000], status_code=500))
         with self.assertRaises(dma.lecture_dvr.ErreurTelechargement):
             dma.lecture_dvr.telecharger_fenetre(self.debut, self.fin, tentatives=1, session_get=session)
         self.assertEqual(self._restes(), [])
@@ -1694,6 +1701,135 @@ class TestPassagePendantRedemarrage(unittest.TestCase):
                                   return_value=(False, 0, "attente-dvr")) as traiter:
             self.assertEqual(dma.main([]), 0)
         self.assertEqual(traiter.call_count, 1)
+
+
+# --- 15/10 au soir : trou d'enregistrement (HTTP 400 / RTSP 404) -------------
+
+class TestTrouDEnregistrementCoteTelechargement(unittest.TestCase):
+    def test_http_400_est_un_trou_pas_une_panne_et_n_est_pas_reessaye(self):
+        appels = []
+
+        def session_get(url, auth, dc, dl):
+            appels.append(url)
+            return _ReponseFactice(400)
+
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(dma.lecture_dvr, "DOSSIER_TMP", d), \
+                mock.patch.dict(os.environ, {"DVR_IP": "1.2.3.4", "DVR_USER": "u",
+                                             "DVR_PASSWORD": "p", "CAMERA_CHANNEL": "15"}):
+            with self.assertRaises(dma.lecture_dvr.ErreurPasDEnregistrement) as ctx:
+                dma.lecture_dvr.telecharger_fenetre(
+                    datetime(2026, 10, 15, 8, 43), datetime(2026, 10, 15, 8, 48),
+                    session_get=session_get, tentatives=3)
+            self.assertEqual(os.listdir(d), [])         # fichier temporaire supprimé
+        self.assertEqual(len(appels), 1)
+        self.assertNotIsInstance(ctx.exception, dma.lecture_dvr.ErreurTelechargement)
+
+    def test_video_recente_disponible_ne_leve_jamais(self):
+        def session_get(url, auth, dc, dl):
+            raise ConnectionError("Read timed out")
+
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(dma.lecture_dvr, "DOSSIER_TMP", d), \
+                mock.patch.dict(os.environ, {"DVR_IP": "1.2.3.4", "DVR_USER": "u",
+                                             "DVR_PASSWORD": "p", "CAMERA_CHANNEL": "15"}), \
+                self.assertLogs("machine_etat", level="WARNING"):
+            self.assertFalse(dma.lecture_dvr.video_recente_disponible(session_get=session_get))
+
+
+class TestTrouDEnregistrement(_AvecHistoriqueVide):
+    debut = datetime(2026, 10, 15, 8, 43)
+    fin = datetime(2026, 10, 15, 8, 48)
+
+    def setUp(self):
+        super().setUp()
+        dma._VIDEO_RECENTE_OK_DEPUIS = None
+
+    def tearDown(self):
+        dma._VIDEO_RECENTE_OK_DEPUIS = None
+        super().tearDown()
+
+    def _trou(self, *a, **k):
+        raise dma.lecture_dvr.ErreurPasDEnregistrement("HTTP 400 : aucun enregistrement")
+
+    def _lire(self, recente_ok):
+        rtsp = mock.MagicMock(return_value=({}, {}))
+        envoi = mock.MagicMock(return_value=(True, "ok"))
+        with mock.patch.object(dma, "analyser_fenetre_http", side_effect=self._trou), \
+                mock.patch.object(dma, "analyser_fenetre", rtsp), \
+                mock.patch.object(dma.lecture_dvr, "video_recente_disponible",
+                                  return_value=recente_ok), \
+                mock.patch.object(dma.lecture_dvr, "envoyer_ordre_redemarrage", envoi), \
+                self.assertLogs("machine_etat", level="WARNING") as journal:
+            resultat = dma.lire_analyser(self.debut, self.fin, "http", t_passage=time.monotonic())
+        # (ERROR, pas WARNING : une coupure doit sauter aux yeux dans le journal)
+        return resultat, rtsp, envoi, "\n".join(journal.output)
+
+    def test_trou_saute_sans_rtsp_ni_disjoncteur_ni_redemarrage(self):
+        dma.lecture_dvr.armer_disjoncteur("HTTP 400", maintenant=datetime(2020, 1, 1))
+        for _ in range(3):   # même plusieurs fois de suite : jamais de redémarrage
+            (m1, m2, methode), rtsp, envoi, journal = self._lire(recente_ok=True)
+            self.assertEqual((m1, m2, methode), ({}, {}, dma.SANS_ENREGISTREMENT))
+            rtsp.assert_not_called()
+            envoi.assert_not_called()
+        self.assertIsNone(dma.lecture_dvr._lire_etat_disjoncteur())
+        self.assertIn("COUPURE D'ENREGISTREMENT", journal)
+
+    def test_si_la_video_recente_echoue_aussi_c_est_une_panne(self):
+        (_, _, methode), rtsp, envoi, _ = self._lire(recente_ok=False)
+        self.assertEqual(methode, "secours-rtsp")
+        rtsp.assert_called_once()
+        self.assertEqual(dma.lecture_dvr._lire_etat_disjoncteur()["echecs"], 1)
+
+    def test_verification_de_la_video_recente_gardee_5_minutes(self):
+        verif = mock.MagicMock(return_value=True)
+        t = [1000.0]
+        with mock.patch.object(dma.lecture_dvr, "video_recente_disponible", verif):
+            self.assertTrue(dma.video_recente_ok(horloge=lambda: t[0]))
+            t[0] += 200
+            self.assertTrue(dma.video_recente_ok(horloge=lambda: t[0]))
+            self.assertEqual(verif.call_count, 1)
+            t[0] += 200
+            dma.video_recente_ok(horloge=lambda: t[0])
+            self.assertEqual(verif.call_count, 2)
+
+    def test_fenetre_sans_enregistrement_envoyee_en_coupure_et_curseurs_avances(self):
+        args = mock.Mock(garder_frames=None, sans_envoi=False)
+        ecrire = mock.MagicMock()
+        envoyer = mock.MagicMock(return_value={"enregistrees": 5})
+        with mock.patch.object(dma, "lire_analyser",
+                               return_value=({}, {}, dma.SANS_ENREGISTREMENT)), \
+                mock.patch.object(dma, "config_api", return_value=("http://x", "j")), \
+                mock.patch.object(dma, "vider_la_file"), \
+                mock.patch.object(dma, "lire_curseur", return_value=self.debut), \
+                mock.patch.object(dma, "ecrire_curseur", ecrire), \
+                mock.patch.object(dma, "envoyer", envoyer), \
+                self.assertLogs("machine_etat", level="INFO"):
+            ok, nb, methode = dma._traiter_une_fenetre(
+                self.debut, self.fin, "http", True, "machine-1", True, "machine-2", args)
+        self.assertEqual((ok, nb, methode), (True, 10, dma.SANS_ENREGISTREMENT))
+        self.assertEqual(envoyer.call_count, 2)          # machine 1 et machine 2
+        for appel in envoyer.call_args_list:
+            lot = appel.args[0]
+            self.assertEqual([m["minute"][11:] for m in lot["minutes"]],
+                             ["08:43", "08:44", "08:45", "08:46", "08:47"])
+            self.assertTrue(all(m["etat"] == "coupure" for m in lot["minutes"]))
+        self.assertEqual(sorted(c.args for c in ecrire.call_args_list),
+                         [("machine-1", self.fin), ("machine-2", self.fin)])
+
+    def test_le_passage_traverse_un_long_trou_d_un_coup(self):
+        t = datetime(2026, 10, 15, 8, 43)
+        fen = [(t + timedelta(minutes=5 * i), t + timedelta(minutes=5 * (i + 1)), timedelta(hours=11))
+               for i in range(20)] + [(None, None, None)]
+        traiter = mock.MagicMock(return_value=(True, 0, dma.SANS_ENREGISTREMENT))
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(dma, "FICHIER_VERROU", os.path.join(d, "l")), \
+                mock.patch.dict(os.environ, {"LECTURE_DVR": "http"}), \
+                mock.patch.object(dma, "fenetre_a_analyser", side_effect=fen), \
+                mock.patch.object(dma, "_traiter_une_fenetre", traiter), \
+                mock.patch.object(dma, "signaler_si_trop_long"):
+            self.assertEqual(dma.main([]), 0)
+        self.assertEqual(traiter.call_count, 20)
 
 
 class TestUnitesRedemarrageDVR(unittest.TestCase):

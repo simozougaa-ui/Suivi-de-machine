@@ -88,6 +88,19 @@ class ErreurLectureFichier(Exception):
     """Le fichier téléchargé n'a pas pu être ouvert/décodé localement."""
 
 
+class ErreurPasDEnregistrement(Exception):
+    """Le DVR RÉPOND, mais refuse la fenêtre (HTTP 400/404) : aucun
+    enregistrement pour ces heures-là (15/10 : rien d'enregistré à partir de
+    08:43, « HTTP 400 » en téléchargement et « 404 Not Found » en RTSP, alors
+    que la vidéo récente se téléchargeait). Volontairement PAS une
+    ErreurTelechargement : ce n'est pas un DVR figé, le redémarrer ne fera
+    pas apparaître la vidéo manquante."""
+
+
+# Réponses du DVR qui veulent dire « rien d'enregistré pour cette fenêtre ».
+CODES_SANS_ENREGISTREMENT = (400, 404)
+
+
 def masquer(texte, mots_secrets=None):
     """Retire les identifiants d'un message avant journalisation : la partie
     `user:pass@` d'une URL, et chaque mot de `mots_secrets` (mot de passe et
@@ -197,6 +210,9 @@ def telecharger_fenetre(debut, fin, delai_max=DELAI_TOTAL_S, tentatives=TENTATIV
                 raise ErreurTelechargement(
                     f"fichier trop petit ({octets} o) : réponse vide ou erreur DVR.")
             return chemin, octets
+        except ErreurPasDEnregistrement:
+            _supprimer(chemin)
+            raise           # réponse nette du DVR : inutile de réessayer
         except ErreurTelechargement as e:
             _supprimer(chemin)
             derniere = masquer(e, secrets)
@@ -222,6 +238,8 @@ def _ecrire_flux(fd, url, auth, delai_max, session_get, delai_inactivite=DELAI_I
     try:
         reponse = session_get(url, auth, 10, delai_inactivite)
         code = getattr(reponse, "status_code", 200)
+        if code in CODES_SANS_ENREGISTREMENT:
+            raise ErreurPasDEnregistrement(f"HTTP {code} : aucun enregistrement pour cette fenêtre")
         if code != 200:
             raise ErreurTelechargement(f"HTTP {code} (loadfile refusé/non supporté ?)")
         fd_pris = True
@@ -420,6 +438,24 @@ def noter_redemarrage_auto(maintenant=None):
     _ecrire_json_atomique(FICHIER_REDEMARRAGES, [x.strftime(FMT_ETAT) for x in passes],
                           ".redemarrages_auto.")
     return sum(1 for x in passes if x.date() == t.date())
+
+
+# --- Le DVR fonctionne-t-il sur la vidéo récente ? ---------------------------
+
+def video_recente_disponible(maintenant=None, session_get=None):
+    """True si 30 s de vidéo RÉCENTE (finissant 5 min avant maintenant, même
+    délai que la détection) se téléchargent. Sert à distinguer un trou
+    d'enregistrement (DVR qui marche, vieille fenêtre absente) d'une panne
+    du DVR. Ne lève jamais ; le fichier est supprimé aussitôt."""
+    from datetime import timedelta
+    fin = (maintenant or datetime.now()).replace(second=0, microsecond=0) - timedelta(minutes=5)
+    try:
+        chemin, _ = telecharger_fenetre(fin - timedelta(seconds=30), fin, session_get=session_get)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Vidéo récente non téléchargeable non plus (%s).", masquer(e))
+        return False
+    _supprimer(chemin)
+    return True
 
 
 # --- Redémarrage du DVR à distance -------------------------------------------

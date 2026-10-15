@@ -2826,3 +2826,96 @@ encore) :
   - la cause exacte du blocage du 15/10 ;
   - le redémarrage automatique contre le vrai DVR. La requête est la même
     que celle validée à la main le 14/10 à 23:52 (« 200 OK »).
+
+---
+
+# Coupure de courant du 15/10 : trou d'enregistrement signalé, plus jamais bloquant (2026-10-15, 20 h)
+
+## Ce qui s'est passé (vérifié sur les journaux et dans DMSS)
+
+Le vrai blocage du 15/10 n'était pas un DVR figé :
+- **le code du 14/10 n'avait pas été installé.** Le `git pull` de 20:00 est
+  passé de `b032dba` à `d756e58` : le Jetson tournait encore avec le code
+  du 3/10 ;
+- **le DVR n'a rien enregistré de ~08:10 à ~08:50.** La frise DMSS montre un
+  trou entre les deux barres vertes. Cause probable, signalée par le
+  patron : une coupure de courant.
+
+Pour la fenêtre 08:43 → 08:48, le DVR répondait « HTTP 400 » au
+téléchargement et « 404 Not Found » en RTSP. Le redémarrage manuel de 20:00 a
+réussi (vidéo récente : 5,6 Mo), et pourtant la même fenêtre échouait encore
+à chaque passage. Le programme réessayait sans fin une vidéo qui n'existe
+pas. Avec le code de 19:20, il aurait en plus redémarré le DVR pour rien au
+2e échec.
+
+## Corrections (décisions autonomes, sauf l'affichage : demande du patron)
+
+**Trou d'enregistrement reconnu.**
+- HTTP 400/404 au téléchargement = « aucun enregistrement pour ces heures »
+  (`ErreurPasDEnregistrement`). Ce n'est pas un échec de téléchargement :
+  pas de nouvel essai, et ça ne compte jamais pour le redémarrage
+  automatique.
+- **Garde-fou :** la fenêtre n'est déclarée « sans enregistrement » que si
+  30 s de vidéo RÉCENTE se téléchargent (DVR qui fonctionne). Le résultat
+  est gardé 5 min, pour ne pas refaire la vérification à chaque fenêtre
+  d'un long trou.
+- Si la vidéo récente échoue aussi, c'est une panne du DVR : disjoncteur et
+  redémarrage automatique, comme avant.
+
+**Coupure signalée, pas ignorée.** Demande du patron : une coupure de courant
+n'est jamais normale (risque de vol), il faut la voir en haut.
+- Chaque minute de la fenêtre est envoyée avec l'état **« coupure »**, pour
+  chaque machine active.
+- Le journal le dit en ERREUR : « COUPURE D'ENREGISTREMENT : le DVR n'a rien
+  enregistré de … à … ».
+- Le curseur avance et le passage enchaîne les fenêtres. Un trou de
+  plusieurs heures est traversé en quelques secondes ; la détection n'est
+  plus jamais bloquée par un trou.
+
+**Côté application** (`suivi-production-imprimerie`, même jour, aucune
+nouvelle page ni route) :
+- la route d'ingestion existante accepte l'état « coupure » ;
+- dans la frise d'« État de la machine », la coupure est en noir, avec une
+  ligne « Coupure » dans les totaux ;
+- une **alerte rouge en haut** de « État de la machine » et de « La
+  journée » (vues Production et Marche / arrêt) liste les coupures du jour
+  avec leurs heures.
+
+**Précision : à 5 min près.** Seule une fenêtre de 5 min ENTIÈREMENT absente
+est marquée « coupure ». Une fenêtre à moitié enregistrée est lue comme
+avant : les minutes manquantes restent « non mesurées ».
+
+**Ordre de déploiement sans risque.** Si le Jetson envoie des minutes
+« coupure » avant que l'application soit à jour, elles sont refusées puis
+mises en file d'attente, et renvoyées automatiquement une fois
+l'application déployée.
+
+## Commandes (une ligne chacune)
+
+(a) Mettre à jour le Jetson :
+
+    cd ~/suivi-de-machine && git pull origin main
+
+(b) Vérifier, 5 à 10 min plus tard, que la coupure est signalée puis que le
+rattrapage avance (« COUPURE D'ENREGISTREMENT … », puis « Lecture HTTP … ») :
+
+    sudo journalctl -u suivi-machine-etat.service -n 40 --no-pager
+
+## Vérifications
+
+- `python3 -m unittest machine_etat.test_detecter_marche_arret` : **119/119**
+  (111 + 8 nouveaux). Les nouveaux tests couvrent :
+  - HTTP 400 = trou, sans nouvel essai et sans fichier laissé ;
+  - HTTP 404 = trou, mais HTTP 500 reste une panne ;
+  - la vérification de la vidéo récente ne lève jamais d'erreur ;
+  - un trou n'arme pas le disjoncteur et ne redémarre jamais le DVR, même
+    trois fois de suite ;
+  - un trou avec la vidéo récente en échec = panne ;
+  - la vérification est gardée 5 min ;
+  - une fenêtre sans enregistrement donne 5 minutes « coupure » par machine
+    et fait avancer les curseurs ;
+  - un trou de 20 fenêtres est traversé en un seul passage.
+- `python3 -m unittest outils_zones.test_outils_zones` : 32/32.
+- **Non vérifié ici** (aucun accès DVR/Jetson) : que le DVR réponde
+  toujours 400/404 pour une heure non enregistrée. C'est observé le 15/10,
+  pour une seule fenêtre.

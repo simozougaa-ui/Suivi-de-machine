@@ -676,7 +676,7 @@ def lire_analyser(debut, fin, methode, garder_frames=None, calculer_machine2=Tru
         if pause and pause["redemarrage"]:
             logger.warning(
                 "DVR en cours de redémarrage automatique : aucune lecture avant %s "
-                "(fenêtre %s -> %s reprise ensuite, rien n'est perdu).",
+                "(fenêtre %s -> %s non lue pour l'instant).",
                 pause["jusqua"].strftime("%H:%M"), debut.strftime("%H:%M"), fin.strftime("%H:%M"))
             return None, None, "attente-dvr"
         if pause:
@@ -1146,8 +1146,19 @@ def _passage(ap, args, mode_auto, machine1_id, machine2_active, machine2_id, t_p
         morceau = debut
         while morceau < fin:
             fin_morceau = min(fin, morceau + timedelta(minutes=FENETRE_MINUTES))
-            ok, _, _ = _traiter_une_fenetre(morceau, fin_morceau, methode, mode_auto,
-                                            machine1_id, machine2_active, machine2_id, args)
+            ok, _, methode_utilisee = _traiter_une_fenetre(
+                morceau, fin_morceau, methode, mode_auto,
+                machine1_id, machine2_active, machine2_id, args)
+            if methode_utilisee == "attente-dvr":
+                # Une commande manuelle ne se relance pas toute seule : on
+                # s'arrête et on dit quand la relancer (15/10, 20:17).
+                pause = lecture_dvr.http_en_pause()
+                logger.error(
+                    "DVR en cours de redémarrage : rien n'a été traité à partir de %s. "
+                    "Relancer CETTE MÊME commande après %s.",
+                    morceau.strftime("%H:%M"),
+                    pause["jusqua"].strftime("%H:%M") if pause else "quelques minutes")
+                return 1
             tout_ok = tout_ok and ok
             morceau = fin_morceau
         signaler_si_trop_long(time.monotonic() - t_passage, debut, fin)

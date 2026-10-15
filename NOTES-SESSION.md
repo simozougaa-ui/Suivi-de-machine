@@ -2919,3 +2919,23 @@ rattrapage avance (« COUPURE D'ENREGISTREMENT … », puis « Lecture HTTP … 
 - **Non vérifié ici** (aucun accès DVR/Jetson) : que le DVR réponde
   toujours 400/404 pour une heure non enregistrée. C'est observé le 15/10,
   pour une seule fenêtre.
+
+### Complément (20:20) : commande manuelle pendant un redémarrage du DVR
+
+Journal du 15/10 :
+- **20:15 :** le passage tournait encore avec le code de 20:00, qui ne
+  reconnaissait pas les trous. Il a vu un 2e « HTTP 400 » sur 08:43 et a
+  redémarré le DVR pour rien. C'était le cas prévu ; le `git pull` de 20:17
+  l'empêche désormais.
+- **20:17 :** la récupération manuelle 08:05 → 08:55 est tombée pendant les
+  8 minutes d'attente du redémarrage. Chaque morceau a été sauté avec « rien
+  n'est perdu », ce qui est FAUX en mode manuel : une commande manuelle ne
+  se relance pas toute seule.
+
+Correction :
+- en mode manuel, le premier morceau en attente du redémarrage arrête la
+  commande, avec le code de sortie 1 ;
+- elle affiche en ERREUR « Relancer CETTE MÊME commande après HH:MM » ;
+- le message du mode automatique dit maintenant « non lue pour l'instant ».
+
+Tests : 120/120 (+1).

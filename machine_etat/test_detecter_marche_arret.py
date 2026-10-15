@@ -1832,6 +1832,18 @@ class TestTrouDEnregistrement(_AvecHistoriqueVide):
         self.assertEqual(traiter.call_count, 20)
 
 
+class TestManuelPendantRedemarrage(_AvecDisjoncteurPropre):
+    def test_s_arrete_au_premier_morceau_et_dit_quand_relancer(self):
+        dma.lecture_dvr.armer_pause_redemarrage()
+        traiter = mock.MagicMock(return_value=(False, 0, "attente-dvr"))
+        with mock.patch.object(dma, "_traiter_une_fenetre", traiter), \
+                self.assertLogs("machine_etat", level="ERROR") as journal:
+            code = dma.main(["--date", "2026-10-15", "--debut", "08:05", "--fin", "08:55"])
+        self.assertEqual(code, 1)
+        self.assertEqual(traiter.call_count, 1)
+        self.assertIn("Relancer CETTE MÊME commande", "\n".join(journal.output))
+
+
 class TestUnitesRedemarrageDVR(unittest.TestCase):
     def test_python_jamais_en_root_et_detection_relancee(self):
         service = _lire_unite("suivi-dvr-redemarrage.service")

@@ -53,10 +53,29 @@ TENTATIVES_HTTP = 1
 # Disjoncteur : après un échec HTTP, les passages suivants lisent en RTSP
 # pendant PAUSE_HTTP_MIN au lieu de reperdre du temps sur un DVR figé, puis
 # le HTTP est retenté. Fichier d'état à côté de curseur.json (gitignoré).
+# 10 min (30 avant le 15/10) : le 2e échec, qui déclenche le redémarrage
+# automatique du DVR, arrive ainsi 10 min après le premier et non 30.
 FICHIER_DISJONCTEUR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                    "http_en_panne.json")
-PAUSE_HTTP_MIN = 30
+PAUSE_HTTP_MIN = 10
 FMT_ETAT = "%Y-%m-%dT%H:%M:%S"
+
+# Redémarrage AUTOMATIQUE du DVR (2026-10-15, après le 2e blocage en deux
+# jours) : au ECHECS_AVANT_REDEMARRAGE-ième échec HTTP consécutif, le passage
+# envoie lui-même l'ordre de redémarrage (sans attendre le retour du DVR,
+# trop long pour un passage), puis les passages attendent
+# PAUSE_APRES_REDEMARRAGE_MIN sans rien lire avant de retenter le HTTP.
+# Garde-fous : jamais deux redémarrages automatiques à moins de
+# ECART_MIN_REDEMARRAGES_MIN, au plus MAX_REDEMARRAGES_AUTO_PAR_JOUR par
+# jour (un redémarrage coupe l'enregistrement de TOUTES les caméras ~2 min),
+# et désactivable par DVR_REDEMARRAGE_AUTO=0 dans .env. Historique dans un
+# fichier séparé du disjoncteur (qui est supprimé dès que le HTTP revient).
+ECHECS_AVANT_REDEMARRAGE = 2
+PAUSE_APRES_REDEMARRAGE_MIN = 8
+ECART_MIN_REDEMARRAGES_MIN = 60
+MAX_REDEMARRAGES_AUTO_PAR_JOUR = 4
+FICHIER_REDEMARRAGES = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                    "redemarrages_auto.json")
 
 FMT_DAHUA = "%Y-%m-%d %H:%M:%S"
 
@@ -281,6 +300,19 @@ def ouvrir_fichier(chemin, ouvrir_capture=None):
 
 # --- Disjoncteur « HTTP en panne » -------------------------------------------
 
+def _ecrire_json_atomique(chemin, donnees, prefixe):
+    import json
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(chemin), prefix=prefixe, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(donnees, f)
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, chemin)
+    except BaseException:
+        _supprimer(tmp)
+        raise
+
+
 def _lire_etat_disjoncteur():
     import json
     try:
@@ -288,44 +320,59 @@ def _lire_etat_disjoncteur():
             etat = json.load(f)
         return {"depuis": datetime.strptime(etat["depuis"], FMT_ETAT),
                 "jusqua": datetime.strptime(etat["jusqua"], FMT_ETAT),
-                "cause": str(etat.get("cause", ""))}
+                "cause": str(etat.get("cause", "")),
+                # Absents d'un fichier écrit avant le 15/10 : 1 échec, pas
+                # de redémarrage en cours.
+                "echecs": int(etat.get("echecs", 1)),
+                "redemarrage": bool(etat.get("redemarrage", False))}
     except (FileNotFoundError, ValueError, KeyError, TypeError):
         return None
 
 
 def http_en_pause(maintenant=None):
-    """État du disjoncteur s'il est ENCORE actif (dict depuis/jusqua/cause),
-    sinon None. Un fichier illisible compte comme « pas de pause »."""
+    """État du disjoncteur s'il est ENCORE actif (dict depuis/jusqua/cause/
+    echecs/redemarrage), sinon None. Un fichier illisible compte comme « pas
+    de pause ». redemarrage=True : pause d'attente après un redémarrage
+    automatique du DVR (rien ne doit être lu pendant ce temps)."""
     etat = _lire_etat_disjoncteur()
     if etat and (maintenant or datetime.now()) < etat["jusqua"]:
         return etat
     return None
 
 
+def _ecrire_disjoncteur(depuis, jusqua, cause, echecs, redemarrage):
+    _ecrire_json_atomique(FICHIER_DISJONCTEUR, {
+        "depuis": depuis.strftime(FMT_ETAT), "jusqua": jusqua.strftime(FMT_ETAT),
+        "cause": cause, "echecs": echecs, "redemarrage": redemarrage}, ".http_en_panne.")
+    return {"depuis": depuis, "jusqua": jusqua, "cause": cause,
+            "echecs": echecs, "redemarrage": redemarrage}
+
+
 def armer_disjoncteur(cause, maintenant=None):
-    """Met le HTTP en pause PAUSE_HTTP_MIN minutes. Garde l'heure du PREMIER
-    échec (« depuis ») tant que le HTTP n'a pas été rétabli, pour que le
-    journal dise depuis quand le DVR ne répond plus. Écriture atomique."""
-    import json
+    """Met le HTTP en pause PAUSE_HTTP_MIN minutes et compte les échecs
+    CONSÉCUTIFS (« echecs », remis à zéro seulement quand le HTTP revient ou
+    qu'un redémarrage est lancé). Garde l'heure du PREMIER échec (« depuis »)
+    tant que le HTTP n'a pas été rétabli, pour que le journal dise depuis
+    quand le DVR ne répond plus. Écriture atomique."""
     from datetime import timedelta
     t = (maintenant or datetime.now()).replace(microsecond=0)
     ancien = _lire_etat_disjoncteur()
     depuis = ancien["depuis"] if ancien else t
-    etat = {"depuis": depuis.strftime(FMT_ETAT),
-            "jusqua": (t + timedelta(minutes=PAUSE_HTTP_MIN)).strftime(FMT_ETAT),
-            "cause": masquer(cause)[:200]}
-    dossier = os.path.dirname(FICHIER_DISJONCTEUR)
-    fd, tmp = tempfile.mkstemp(dir=dossier, prefix=".http_en_panne.", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(etat, f)
-        os.chmod(tmp, 0o644)
-        os.replace(tmp, FICHIER_DISJONCTEUR)
-    except BaseException:
-        _supprimer(tmp)
-        raise
-    return {"depuis": depuis, "jusqua": t + timedelta(minutes=PAUSE_HTTP_MIN),
-            "cause": etat["cause"]}
+    echecs = (ancien["echecs"] if ancien else 0) + 1
+    return _ecrire_disjoncteur(depuis, t + timedelta(minutes=PAUSE_HTTP_MIN),
+                               masquer(cause)[:200], echecs, False)
+
+
+def armer_pause_redemarrage(maintenant=None):
+    """Après l'envoi d'un ordre de redémarrage : aucune lecture pendant
+    PAUSE_APRES_REDEMARRAGE_MIN (le DVR est éteint, puis démarre), compteur
+    d'échecs remis à zéro. Renvoie l'état écrit."""
+    from datetime import timedelta
+    t = (maintenant or datetime.now()).replace(microsecond=0)
+    ancien = _lire_etat_disjoncteur()
+    depuis = ancien["depuis"] if ancien else t
+    return _ecrire_disjoncteur(depuis, t + timedelta(minutes=PAUSE_APRES_REDEMARRAGE_MIN),
+                               "redémarrage automatique du DVR", 0, True)
 
 
 def liberer_disjoncteur():
@@ -333,6 +380,46 @@ def liberer_disjoncteur():
     existait = os.path.exists(FICHIER_DISJONCTEUR)
     _supprimer(FICHIER_DISJONCTEUR)
     return existait
+
+
+# --- Historique et limites des redémarrages automatiques ---------------------
+
+def _lire_redemarrages():
+    import json
+    try:
+        with open(FICHIER_REDEMARRAGES, encoding="utf-8") as f:
+            return sorted(datetime.strptime(x, FMT_ETAT) for x in json.load(f))
+    except (FileNotFoundError, ValueError, TypeError):
+        return []
+
+
+def redemarrage_auto_permis(maintenant=None):
+    """(True, "") si un redémarrage automatique du DVR est permis maintenant,
+    sinon (False, raison lisible)."""
+    from datetime import timedelta
+    if (os.getenv("DVR_REDEMARRAGE_AUTO") or "1").strip() == "0":
+        return False, "désactivé par DVR_REDEMARRAGE_AUTO=0 dans .env"
+    t = maintenant or datetime.now()
+    passes = _lire_redemarrages()
+    if passes and t - passes[-1] < timedelta(minutes=ECART_MIN_REDEMARRAGES_MIN):
+        return False, (f"déjà redémarré automatiquement à {passes[-1].strftime('%H:%M')} "
+                       f"(un seul par {ECART_MIN_REDEMARRAGES_MIN} min)")
+    du_jour = [x for x in passes if x.date() == t.date()]
+    if len(du_jour) >= MAX_REDEMARRAGES_AUTO_PAR_JOUR:
+        return False, (f"déjà {len(du_jour)} redémarrages automatiques aujourd'hui "
+                       f"(maximum {MAX_REDEMARRAGES_AUTO_PAR_JOUR}) — vérifier le DVR sur place")
+    return True, ""
+
+
+def noter_redemarrage_auto(maintenant=None):
+    """Ajoute un redémarrage automatique à l'historique (7 derniers jours
+    gardés). Renvoie le nombre de redémarrages automatiques du jour."""
+    from datetime import timedelta
+    t = (maintenant or datetime.now()).replace(microsecond=0)
+    passes = [x for x in _lire_redemarrages() if t - x < timedelta(days=7)] + [t]
+    _ecrire_json_atomique(FICHIER_REDEMARRAGES, [x.strftime(FMT_ETAT) for x in passes],
+                          ".redemarrages_auto.")
+    return sum(1 for x in passes if x.date() == t.date())
 
 
 # --- Redémarrage du DVR à distance -------------------------------------------
@@ -357,18 +444,14 @@ def _dvr_repond(session_get, delai=5):
         return False
 
 
-def redemarrer_dvr(session_get=None, attente_arret_s=90, attente_retour_s=300,
-                   pas_s=5, dormir=time.sleep, horloge=time.monotonic, verifier=None):
-    """Redémarre le DVR (magicBox.cgi?action=reboot, auth digest), attend
-    qu'il s'arrête puis revienne, puis vérifie qu'un VRAI téléchargement
-    passe (le module figé la nuit du 14/10 répondait encore au ping).
-    Libère le disjoncteur en cas de succès. Renvoie (succes, message).
-
-    Tout est injectable (session_get, dormir, horloge, verifier) pour les
-    tests : aucune attente réelle n'y est faite."""
+def envoyer_ordre_redemarrage(session_get=None):
+    """Envoie SEULEMENT l'ordre de redémarrage (magicBox.cgi?action=reboot,
+    auth digest), sans attendre le retour du DVR (utilisé tel quel par le
+    redémarrage automatique, dont le passage ne peut pas attendre ~5 min).
+    Renvoie (envoye, message). Ne lève jamais."""
     session_get = session_get or _requests_get
-    _, user, mdp, _, _ = _config_http()
     try:
+        _, user, mdp, _, _ = _config_http()
         rep = session_get(_url_base() + "/cgi-bin/magicBox.cgi?action=reboot",
                           (user, mdp), 10, 20)
         code = getattr(rep, "status_code", 200)
@@ -380,6 +463,22 @@ def redemarrer_dvr(session_get=None, attente_arret_s=90, attente_retour_s=300,
             return False, f"le DVR a refusé l'ordre de redémarrage (HTTP {code})."
     except Exception as e:  # noqa: BLE001
         return False, f"ordre de redémarrage non transmis : {masquer(e)}"
+    return True, "ordre de redémarrage accepté par le DVR."
+
+
+def redemarrer_dvr(session_get=None, attente_arret_s=90, attente_retour_s=300,
+                   pas_s=5, dormir=time.sleep, horloge=time.monotonic, verifier=None):
+    """Redémarre le DVR (magicBox.cgi?action=reboot, auth digest), attend
+    qu'il s'arrête puis revienne, puis vérifie qu'un VRAI téléchargement
+    passe (le module figé la nuit du 14/10 répondait encore au ping).
+    Libère le disjoncteur en cas de succès. Renvoie (succes, message).
+
+    Tout est injectable (session_get, dormir, horloge, verifier) pour les
+    tests : aucune attente réelle n'y est faite."""
+    session_get = session_get or _requests_get
+    envoye, message = envoyer_ordre_redemarrage(session_get)
+    if not envoye:
+        return False, message
     logger.info("Ordre de redémarrage accepté par le DVR, attente de son arrêt...")
 
     t0 = horloge()

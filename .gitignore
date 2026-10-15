@@ -60,3 +60,7 @@ machine_etat/.curseur.*.tmp
 # propre à chaque Jetson, jamais committé.
 machine_etat/http_en_panne.json
 machine_etat/.http_en_panne.*.tmp
+# Historique des redémarrages automatiques du DVR (lecture_dvr.py) : propre à
+# chaque Jetson, jamais committé.
+machine_etat/redemarrages_auto.json
+machine_etat/.redemarrages_auto.*.tmp

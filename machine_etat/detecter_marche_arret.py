@@ -609,22 +609,36 @@ def temps_rtsp_suffisant(t_passage, debut, fin, horloge=time.monotonic):
     return (horloge() - t_passage) + besoin < TIMEOUT_SERVICE_S
 
 
+# Méthodes renvoyées par lire_analyser quand RIEN n'a été lu : la fenêtre
+# est reprise au prochain passage (curseur inchangé). « attente-dvr » est
+# normal (DVR en cours de redémarrage automatique) : pas un échec du passage.
+RIEN_LU = ("abandon", "attente-dvr")
+
+
 def lire_analyser(debut, fin, methode, garder_frames=None, calculer_machine2=True,
                   t_passage=None):
     """Lit et classe une fenêtre par `methode` (« http » ou « rtsp »).
     Renvoie (par_minute_m1, par_minute_m2, methode_utilisee) avec
     methode_utilisee parmi « http », « rtsp », « secours-rtsp »,
-    « rtsp-http-en-pause », ou « abandon » (m1 = m2 = None : rien lu, la
-    fenêtre sera reprise au prochain passage, curseur inchangé).
+    « rtsp-http-en-pause », ou l'une de RIEN_LU (m1 = m2 = None : rien lu,
+    la fenêtre sera reprise au prochain passage, curseur inchangé).
 
     En http : si le téléchargement échoue, le disjoncteur met le HTTP en
-    pause (voir lecture_dvr.armer_disjoncteur) et le journal le dit en
-    ERREUR, avec la commande pour redémarrer le DVR ; pendant la pause, les
-    passages lisent directement en RTSP sans reperdre de temps ; après la
-    pause, le HTTP est retenté. `t_passage` (mode automatique) : un secours
-    RTSP n'est lancé que s'il a le temps de finir avant TimeoutStartSec."""
+    pause PAUSE_HTTP_MIN (lecture RTSP en attendant). Au 2e échec consécutif
+    (DVR figé comme le 14/10 et le 15/10), le DVR est REDÉMARRÉ
+    AUTOMATIQUEMENT (dans les limites de lecture_dvr.redemarrage_auto_permis)
+    et les passages attendent son retour sans rien lire (« attente-dvr »).
+    `t_passage` (mode automatique) : un secours RTSP n'est lancé que s'il a
+    le temps de finir avant TimeoutStartSec. Une lecture RTSP qui échoue (DVR
+    injoignable) ne fait plus planter le passage : « abandon »."""
     if methode == "http":
         pause = lecture_dvr.http_en_pause()
+        if pause and pause["redemarrage"]:
+            logger.warning(
+                "DVR en cours de redémarrage automatique : aucune lecture avant %s "
+                "(fenêtre %s -> %s reprise ensuite, rien n'est perdu).",
+                pause["jusqua"].strftime("%H:%M"), debut.strftime("%H:%M"), fin.strftime("%H:%M"))
+            return None, None, "attente-dvr"
         if pause:
             logger.warning(
                 "Lecture HTTP en pause jusqu'à %s (le DVR ne répond plus en "
@@ -645,11 +659,16 @@ def lire_analyser(debut, fin, methode, garder_frames=None, calculer_machine2=Tru
             except (lecture_dvr.ErreurTelechargement, lecture_dvr.ErreurLectureFichier) as e:
                 cause = lecture_dvr.masquer(e)
                 etat = lecture_dvr.armer_disjoncteur(cause)
-                logger.error(
-                    "DVR : le téléchargement HTTP ne répond plus (%s), en panne depuis "
-                    "%s. HTTP mis en pause %d min (lecture RTSP en attendant). Si ça "
-                    "dure, redémarrer le DVR : sudo systemctl start suivi-dvr-redemarrage.service",
-                    cause, etat["depuis"].strftime("%d/%m %H:%M"), lecture_dvr.PAUSE_HTTP_MIN)
+                if etat["echecs"] >= lecture_dvr.ECHECS_AVANT_REDEMARRAGE:
+                    if redemarrage_automatique(etat, cause):
+                        return None, None, "attente-dvr"
+                else:
+                    logger.error(
+                        "DVR : le téléchargement HTTP ne répond plus (%s), en panne depuis "
+                        "%s. HTTP mis en pause %d min (lecture RTSP en attendant) ; si "
+                        "le prochain essai échoue aussi, le DVR sera redémarré "
+                        "automatiquement.",
+                        cause, etat["depuis"].strftime("%d/%m %H:%M"), lecture_dvr.PAUSE_HTTP_MIN)
                 methode_rtsp = "secours-rtsp"
     else:
         methode_rtsp = "rtsp"
@@ -660,8 +679,47 @@ def lire_analyser(debut, fin, methode, garder_frames=None, calculer_machine2=Tru
             "du service : fenêtre reprise au prochain passage (curseur inchangé).",
             debut.strftime("%H:%M"), fin.strftime("%H:%M"), TIMEOUT_SERVICE_S)
         return None, None, "abandon"
-    m1, m2 = analyser_fenetre(debut, fin, garder_frames, calculer_machine2)
+    try:
+        m1, m2 = analyser_fenetre(debut, fin, garder_frames, calculer_machine2)
+    except Exception as e:  # noqa: BLE001 — DVR injoignable : pas de plantage
+        logger.error(
+            "Lecture RTSP impossible (%s) : fenêtre %s -> %s reprise au prochain "
+            "passage (curseur inchangé).",
+            lecture_dvr.masquer(e), debut.strftime("%H:%M"), fin.strftime("%H:%M"))
+        return None, None, "abandon"
     return m1, m2, methode_rtsp
+
+
+def redemarrage_automatique(etat, cause):
+    """Le téléchargement HTTP a échoué etat["echecs"] fois de suite : envoie
+    l'ordre de redémarrage au DVR si les garde-fous le permettent. Renvoie
+    True si l'ordre est parti (les passages attendent alors le retour du
+    DVR), False sinon (l'appelant lit en RTSP comme avant)."""
+    depuis = etat["depuis"].strftime("%d/%m %H:%M")
+    permis, raison = lecture_dvr.redemarrage_auto_permis()
+    if not permis:
+        logger.error(
+            "DVR : téléchargement HTTP toujours figé (%s, %d échecs de suite depuis %s) ; "
+            "redémarrage automatique NON lancé : %s. Lecture RTSP en attendant. "
+            "Redémarrage manuel : sudo systemctl start suivi-dvr-redemarrage.service",
+            cause, etat["echecs"], depuis, raison)
+        return False
+    envoye, message = lecture_dvr.envoyer_ordre_redemarrage()
+    # Noté même si l'ordre n'est pas passé : on ne réessaie pas à chaque passage.
+    nb_jour = lecture_dvr.noter_redemarrage_auto()
+    if not envoye:
+        logger.error(
+            "DVR : téléchargement HTTP toujours figé (%s, depuis %s) ; redémarrage "
+            "automatique ÉCHOUÉ : %s. Lecture RTSP en attendant.", cause, depuis, message)
+        return False
+    pause = lecture_dvr.armer_pause_redemarrage()
+    logger.error(
+        "DVR : téléchargement HTTP toujours figé (%s, %d échecs de suite depuis %s) : "
+        "DVR REDÉMARRÉ AUTOMATIQUEMENT (%de fois aujourd'hui, maximum %d). Lecture "
+        "reprise vers %s, le retard sera rattrapé.",
+        cause, etat["echecs"], depuis, nb_jour, lecture_dvr.MAX_REDEMARRAGES_AUTO_PAR_JOUR,
+        pause["jusqua"].strftime("%H:%M"))
+    return True
 
 
 def classer(par_minute):
@@ -1055,8 +1113,10 @@ def _passage(ap, args, mode_auto, machine1_id, machine2_active, machine2_id, t_p
         ok, _, methode_utilisee = _traiter_une_fenetre(
             debut, fin, methode, mode_auto, machine1_id, machine2_active, machine2_id,
             args, t_passage=t_passage)
-        if methode_utilisee == "abandon":
-            code = 1
+        if methode_utilisee in RIEN_LU:
+            # Rien lu : fenêtre reprise au prochain passage. L'attente du
+            # retour du DVR après un redémarrage automatique n'est pas un échec.
+            code = 1 if methode_utilisee == "abandon" else 0
             break
         if premier_debut is None:
             premier_debut = debut
@@ -1090,7 +1150,7 @@ def _traiter_une_fenetre(debut, fin, methode, mode_auto, machine1_id,
     """Lit, classe, journalise et (sauf --sans-envoi) envoie UNE fenêtre.
     Avance les curseurs via traiter_envoi_machine (après envoi réussi
     seulement). Renvoie (succes, nb_minutes_classees, methode_utilisee) ;
-    methode_utilisee == « abandon » : rien lu, rien envoyé, curseur inchangé."""
+    methode_utilisee dans RIEN_LU : rien lu, rien envoyé, curseur inchangé."""
     logger.info("Analyse des enregistrements de %s à %s (lecture %s, machine 2 %s)",
                 debut.strftime("%Y-%m-%d %H:%M"), fin.strftime("%H:%M"), methode,
                 "active" if machine2_active else "désactivée")
@@ -1100,8 +1160,8 @@ def _traiter_une_fenetre(debut, fin, methode, mode_auto, machine1_id,
         debut, fin, methode, args.garder_frames, calculer_machine2=machine2_active,
         t_passage=t_passage)
     duree_calcul = time.time() - debut_calcul
-    if methode_utilisee == "abandon":
-        return False, 0, "abandon"
+    if methode_utilisee in RIEN_LU:
+        return False, 0, methode_utilisee
 
     lignes_m1 = classer(par_minute_m1)
     logger.info("Machine 1 : %d minute(s) classée(s) en %.1f s (lecture %s)",

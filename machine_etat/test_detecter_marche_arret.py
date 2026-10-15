@@ -41,6 +41,7 @@ GRIS_FOND = 100
 
 _DOSSIER_ETAT = None
 _DISJONCTEUR_ORIGINAL = None
+_REDEMARRAGES_ORIGINAL = None
 
 
 def setUpModule():
@@ -50,10 +51,15 @@ def setUpModule():
     _DOSSIER_ETAT = tempfile.TemporaryDirectory()
     _DISJONCTEUR_ORIGINAL = dma.lecture_dvr.FICHIER_DISJONCTEUR
     dma.lecture_dvr.FICHIER_DISJONCTEUR = os.path.join(_DOSSIER_ETAT.name, "http_en_panne.json")
+    # Idem pour l'historique des redémarrages automatiques du DVR.
+    global _REDEMARRAGES_ORIGINAL
+    _REDEMARRAGES_ORIGINAL = dma.lecture_dvr.FICHIER_REDEMARRAGES
+    dma.lecture_dvr.FICHIER_REDEMARRAGES = os.path.join(_DOSSIER_ETAT.name, "redemarrages_auto.json")
 
 
 def tearDownModule():
     dma.lecture_dvr.FICHIER_DISJONCTEUR = _DISJONCTEUR_ORIGINAL
+    dma.lecture_dvr.FICHIER_REDEMARRAGES = _REDEMARRAGES_ORIGINAL
     _DOSSIER_ETAT.cleanup()
 
 
@@ -1227,7 +1233,7 @@ class TestDisjoncteurHTTP(_AvecDisjoncteurPropre):
 
     def test_arme_puis_expire_apres_la_pause(self):
         dma.lecture_dvr.armer_disjoncteur("Read timed out", maintenant=self.t0)
-        self.assertIsNotNone(dma.lecture_dvr.http_en_pause(self.t0 + timedelta(minutes=10)))
+        self.assertIsNotNone(dma.lecture_dvr.http_en_pause(self.t0 + timedelta(minutes=5)))
         self.assertIsNone(dma.lecture_dvr.http_en_pause(
             self.t0 + timedelta(minutes=dma.lecture_dvr.PAUSE_HTTP_MIN, seconds=1)))
 
@@ -1301,7 +1307,7 @@ class TestLireAnalyserDVRFige(_AvecDisjoncteurPropre):
         self.assertEqual(methode, "secours-rtsp")
         self.assertTrue(m1)
         self.assertIsNotNone(dma.lecture_dvr.http_en_pause())
-        self.assertIn("suivi-dvr-redemarrage", "\n".join(journal.output))
+        self.assertIn("redémarré automatiquement", "\n".join(journal.output))
 
     def test_pas_assez_de_temps_abandon_sans_lancer_le_rtsp(self):
         rtsp = mock.MagicMock()
@@ -1494,6 +1500,200 @@ class TestRedemarrageDVR(_AvecDisjoncteurPropre):
             session_get=session, dormir=lambda s: None, horloge=self._horloge(), verifier=verifier)
         self.assertFalse(succes)
         self.assertIsNotNone(dma.lecture_dvr.http_en_pause())   # disjoncteur conservé
+
+
+# --- 15/10 : 2e blocage, redémarrage AUTOMATIQUE du DVR ----------------------
+
+class _AvecHistoriqueVide(_AvecDisjoncteurPropre):
+    def setUp(self):
+        super().setUp()
+        dma.lecture_dvr._supprimer(dma.lecture_dvr.FICHIER_REDEMARRAGES)
+        self._env = mock.patch.dict(os.environ, {"DVR_REDEMARRAGE_AUTO": ""})
+        self._env.start()
+
+    def tearDown(self):
+        self._env.stop()
+        dma.lecture_dvr._supprimer(dma.lecture_dvr.FICHIER_REDEMARRAGES)
+        super().tearDown()
+
+
+class TestCompteurEchecsEtLimites(_AvecHistoriqueVide):
+    t0 = datetime(2026, 10, 15, 8, 10)
+
+    def test_echecs_consecutifs_comptes_et_remis_a_zero_au_retour(self):
+        self.assertEqual(dma.lecture_dvr.armer_disjoncteur("a", maintenant=self.t0)["echecs"], 1)
+        self.assertEqual(dma.lecture_dvr.armer_disjoncteur(
+            "b", maintenant=self.t0 + timedelta(minutes=10))["echecs"], 2)
+        dma.lecture_dvr.liberer_disjoncteur()
+        self.assertEqual(dma.lecture_dvr.armer_disjoncteur("c", maintenant=self.t0)["echecs"], 1)
+
+    def test_pause_redemarrage_remet_les_echecs_a_zero(self):
+        dma.lecture_dvr.armer_disjoncteur("a", maintenant=self.t0)
+        etat = dma.lecture_dvr.armer_pause_redemarrage(maintenant=self.t0)
+        self.assertTrue(etat["redemarrage"])
+        self.assertEqual(etat["depuis"], self.t0)   # heure du 1er échec gardée
+        self.assertTrue(dma.lecture_dvr.http_en_pause(self.t0 + timedelta(minutes=5))["redemarrage"])
+        self.assertEqual(dma.lecture_dvr.armer_disjoncteur(
+            "d", maintenant=self.t0 + timedelta(minutes=9))["echecs"], 1)
+
+    def test_fichier_d_avant_le_15_10_toujours_lu(self):
+        import json
+        with open(dma.lecture_dvr.FICHIER_DISJONCTEUR, "w") as f:
+            json.dump({"depuis": "2026-10-15T08:10:00", "jusqua": "2026-10-15T08:40:00",
+                       "cause": "x"}, f)
+        etat = dma.lecture_dvr.http_en_pause(self.t0)
+        self.assertEqual((etat["echecs"], etat["redemarrage"]), (1, False))
+
+    def test_permis_par_defaut(self):
+        self.assertEqual(dma.lecture_dvr.redemarrage_auto_permis(self.t0), (True, ""))
+
+    def test_un_seul_par_heure(self):
+        dma.lecture_dvr.noter_redemarrage_auto(self.t0)
+        permis, raison = dma.lecture_dvr.redemarrage_auto_permis(self.t0 + timedelta(minutes=59))
+        self.assertFalse(permis)
+        self.assertIn("08:10", raison)
+        self.assertTrue(dma.lecture_dvr.redemarrage_auto_permis(self.t0 + timedelta(minutes=61))[0])
+
+    def test_maximum_par_jour_puis_permis_le_lendemain(self):
+        for h in range(dma.lecture_dvr.MAX_REDEMARRAGES_AUTO_PAR_JOUR):
+            dma.lecture_dvr.noter_redemarrage_auto(datetime(2026, 10, 15, 8 + 2 * h, 0))
+        permis, raison = dma.lecture_dvr.redemarrage_auto_permis(datetime(2026, 10, 15, 22, 0))
+        self.assertFalse(permis)
+        self.assertIn("sur place", raison)
+        self.assertTrue(dma.lecture_dvr.redemarrage_auto_permis(datetime(2026, 10, 16, 1, 0))[0])
+
+    def test_desactivable_dans_env(self):
+        with mock.patch.dict(os.environ, {"DVR_REDEMARRAGE_AUTO": "0"}):
+            self.assertFalse(dma.lecture_dvr.redemarrage_auto_permis(self.t0)[0])
+
+    def test_historique_garde_7_jours(self):
+        dma.lecture_dvr.noter_redemarrage_auto(self.t0 - timedelta(days=8))
+        self.assertEqual(dma.lecture_dvr.noter_redemarrage_auto(self.t0), 1)
+        self.assertEqual(dma.lecture_dvr._lire_redemarrages(), [self.t0])
+
+
+class TestOrdreDeRedemarrage(unittest.TestCase):
+    def test_ordre_seul_sans_identifiants_dans_l_url(self):
+        urls = []
+
+        def session_get(url, auth, dc, dl):
+            urls.append(url)
+            return _ReponseFactice(200)
+
+        with mock.patch.dict(os.environ, {"DVR_IP": "1.2.3.4", "DVR_USER": "admin",
+                                          "DVR_PASSWORD": "Secret123", "CAMERA_CHANNEL": "15"}):
+            envoye, _ = dma.lecture_dvr.envoyer_ordre_redemarrage(session_get)
+        self.assertTrue(envoye)
+        self.assertEqual(len(urls), 1)   # n'attend pas le retour du DVR
+        self.assertIn("action=reboot", urls[0])
+        self.assertNotIn("Secret123", urls[0])
+
+    def test_dvr_injoignable_ne_leve_pas_et_masque(self):
+        def session_get(url, auth, dc, dl):
+            raise ConnectionError("http://admin:Secret123@1.2.3.4 refusée")
+
+        with mock.patch.dict(os.environ, {"DVR_IP": "1.2.3.4", "DVR_USER": "admin",
+                                          "DVR_PASSWORD": "Secret123", "CAMERA_CHANNEL": "15"}):
+            envoye, message = dma.lecture_dvr.envoyer_ordre_redemarrage(session_get)
+        self.assertFalse(envoye)
+        self.assertNotIn("Secret123", message)
+
+
+class TestRedemarrageAutomatique(_AvecHistoriqueVide):
+    debut = datetime(2026, 10, 15, 8, 5)
+    fin = debut + timedelta(seconds=2)
+
+    def _echec_http(self, *a, **k):
+        raise dma.lecture_dvr.ErreurTelechargement("Read timed out")
+
+    def _lire(self, ordre=(True, "ok")):
+        """lire_analyser avec HTTP figé ; renvoie (methode, rtsp, ordre, journal)."""
+        rtsp = mock.MagicMock(return_value=({}, {}))
+        envoi = mock.MagicMock(return_value=ordre)
+        with mock.patch.object(dma, "analyser_fenetre_http", side_effect=self._echec_http), \
+                mock.patch.object(dma, "analyser_fenetre", rtsp), \
+                mock.patch.object(dma.lecture_dvr, "envoyer_ordre_redemarrage", envoi), \
+                self.assertLogs("machine_etat", level="WARNING") as journal:
+            _, _, methode = dma.lire_analyser(self.debut, self.fin, "http",
+                                              t_passage=time.monotonic())
+        return methode, rtsp, envoi, "\n".join(journal.output)
+
+    def _expirer_pause(self):
+        etat = dma.lecture_dvr._lire_etat_disjoncteur()
+        dma.lecture_dvr._ecrire_disjoncteur(etat["depuis"], datetime(2020, 1, 1), etat["cause"],
+                                            etat["echecs"], etat["redemarrage"])
+
+    def test_premier_echec_pas_de_redemarrage(self):
+        methode, rtsp, envoi, _ = self._lire()
+        self.assertEqual(methode, "secours-rtsp")
+        envoi.assert_not_called()
+        rtsp.assert_called_once()
+
+    def test_deuxieme_echec_redemarre_le_dvr_et_attend(self):
+        self._lire()
+        self._expirer_pause()                      # 10 min plus tard : HTTP retenté
+        methode, rtsp, envoi, journal = self._lire()
+        self.assertEqual(methode, "attente-dvr")
+        envoi.assert_called_once()
+        rtsp.assert_not_called()                   # DVR en redémarrage : rien lu
+        self.assertIn("REDÉMARRÉ AUTOMATIQUEMENT", journal)
+        self.assertTrue(dma.lecture_dvr.http_en_pause()["redemarrage"])
+        self.assertEqual(len(dma.lecture_dvr._lire_redemarrages()), 1)
+
+    def test_pendant_le_redemarrage_rien_n_est_lu(self):
+        dma.lecture_dvr.armer_pause_redemarrage()
+        http = mock.MagicMock()
+        rtsp = mock.MagicMock()
+        with mock.patch.object(dma, "analyser_fenetre_http", http), \
+                mock.patch.object(dma, "analyser_fenetre", rtsp), \
+                self.assertLogs("machine_etat", level="WARNING"):
+            m1, _, methode = dma.lire_analyser(self.debut, self.fin, "http")
+        self.assertEqual((m1, methode), (None, "attente-dvr"))
+        http.assert_not_called()
+        rtsp.assert_not_called()
+
+    def test_limite_atteinte_lit_en_rtsp_et_le_dit(self):
+        dma.lecture_dvr.noter_redemarrage_auto()   # redémarré il y a moins d'une heure
+        self._lire()
+        self._expirer_pause()
+        methode, rtsp, envoi, journal = self._lire()
+        self.assertEqual(methode, "secours-rtsp")
+        envoi.assert_not_called()
+        self.assertIn("NON lancé", journal)
+
+    def test_ordre_non_transmis_lit_en_rtsp_et_ne_reessaie_pas_tout_de_suite(self):
+        self._lire()
+        self._expirer_pause()
+        methode, rtsp, envoi, journal = self._lire(ordre=(False, "Connection refused"))
+        self.assertEqual(methode, "secours-rtsp")
+        self.assertIn("ÉCHOUÉ", journal)
+        self.assertFalse(dma.lecture_dvr.redemarrage_auto_permis()[0])
+
+
+class TestRTSPInjoignableNePlantePlus(_AvecDisjoncteurPropre):
+    def test_connexion_refusee_donne_un_abandon(self):
+        debut = datetime(2026, 10, 15, 8, 5)
+        with mock.patch.object(dma, "open_stream",
+                               side_effect=ConnectionError("rtsp://admin:Secret123@1.2.3.4 refusé")), \
+                mock.patch.object(dma, "build_rtsp_playback_url", return_value="rtsp://factice"), \
+                mock.patch.dict(os.environ, {"DVR_PASSWORD": "Secret123"}), \
+                self.assertLogs("machine_etat", level="ERROR") as journal:
+            m1, m2, methode = dma.lire_analyser(debut, debut + timedelta(minutes=5), "rtsp")
+        self.assertEqual((m1, m2, methode), (None, None, "abandon"))
+        self.assertNotIn("Secret123", "\n".join(journal.output))
+
+
+class TestPassagePendantRedemarrage(unittest.TestCase):
+    def test_attente_dvr_arrete_le_passage_sans_erreur(self):
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(dma, "FICHIER_VERROU", os.path.join(d, "l")), \
+                mock.patch.dict(os.environ, {"LECTURE_DVR": "http"}), \
+                mock.patch.object(dma, "fenetre_a_analyser", return_value=(
+                    datetime(2026, 10, 15, 8, 5), datetime(2026, 10, 15, 8, 10), timedelta(hours=1))), \
+                mock.patch.object(dma, "_traiter_une_fenetre",
+                                  return_value=(False, 0, "attente-dvr")) as traiter:
+            self.assertEqual(dma.main([]), 0)
+        self.assertEqual(traiter.call_count, 1)
 
 
 class TestUnitesRedemarrageDVR(unittest.TestCase):

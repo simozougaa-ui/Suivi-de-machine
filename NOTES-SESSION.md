@@ -2710,3 +2710,119 @@ lectures en même temps) :
 - **Non vérifié ici** (aucun accès DVR/Jetson) : le redémarrage réel par la
   nouvelle unité (la même commande `magicBox.cgi?action=reboot` a été validée
   à la main le 14/10 à 23:52 : « 200 OK », DVR revenu et téléchargement OK).
+
+---
+
+# 2e blocage le 15/10 : redémarrage AUTOMATIQUE du DVR (2026-10-15, soir)
+
+## Ce qui s'est passé (d'après les frises, journal non vu)
+
+Le 15/10, Bob B et Bob C sont remplis jusqu'à ~07:59, puis plus rien jusqu'à
+19:14. Le petit trou 07:50 → 07:54 est normal : c'est la remise à jour de
+8 h (curseur placé à 07:55). La fenêtre 07:55 → 08:00 a été lue au passage
+de 08:05 : le timer a donc bien été relancé après 8 h, et ce sont les
+passages suivants qui n'ont plus rien lu. Explication la plus probable (NON
+vérifiée, journal pas encore vu) : le téléchargement HTTP du DVR s'est figé
+une 2e fois, comme le 14/10 à 02:45. Avec le code du matin, le programme ne
+bouclait plus, mais il attendait qu'un humain redémarre le DVR : choix de
+prudence du commit précédent, qui ne tient plus si le DVR se fige tous les
+jours. Autre défaut trouvé en relisant : si le DVR ne répond plus du tout,
+la lecture RTSP de secours levait une exception non gérée (`open_stream`) et
+le passage plantait.
+
+Pourquoi le DVR se fige-t-il maintenant alors que ça a marché 2 à 3 semaines ?
+Pas de certitude sans accès au DVR. Hypothèse : charge. Avant le 14/10, une
+seule fenêtre de 5 min était téléchargée toutes les 5 min ; depuis, les
+rattrapages enchaînent les téléchargements presque sans pause. À
+surveiller : si les redémarrages automatiques se multiplient pendant les
+rattrapages, réduire `BUDGET_RATTRAPAGE_S`.
+
+## Corrections (décisions autonomes)
+
+**Le DVR est redémarré automatiquement.** Au **2e échec HTTP consécutif**
+(le 1er peut être un raté passager), le passage envoie lui-même l'ordre de
+redémarrage au DVR (`magicBox.cgi?action=reboot`, auth digest, identifiants
+jamais dans l'URL ni le journal) sans attendre son retour (trop long pour un
+passage). Les passages suivants ne lisent rien pendant **8 min**
+(« DVR en cours de redémarrage automatique », code de sortie 0, curseur
+inchangé), puis retentent le HTTP ; dès qu'il répond, le retard est rattrapé
+(~50 min de vidéo par passage de 5 min). Le journal écrit en ERREUR
+« DVR REDÉMARRÉ AUTOMATIQUEMENT (Ne fois aujourd'hui, maximum 4) ».
+
+**Délais.** La pause du HTTP après un échec passe de 30 à **10 min**. Le 2e
+essai, celui qui déclenche le redémarrage, a donc lieu ~10 min après le
+premier. Un blocage coûte environ 20 à 25 min de retard, rattrapé ensuite,
+au lieu d'une journée.
+
+**Garde-fous.** Un redémarrage coupe l'enregistrement de TOUTES les caméras
+pendant ~2 min, d'où :
+- au plus 1 redémarrage automatique par heure ;
+- au plus **4 par jour** ; au-delà, le journal dit « vérifier le DVR sur
+  place » et la lecture continue en RTSP ;
+- l'historique est dans `machine_etat/redemarrages_auto.json` (gitignoré,
+  7 jours gardés), séparé du disjoncteur, qui est effacé dès que le HTTP
+  revient. Un ordre qui n'est pas passé compte quand même, pour ne pas
+  insister à chaque passage ;
+- désactivable sans toucher au code : `DVR_REDEMARRAGE_AUTO=0` dans `.env`.
+
+**Le RTSP ne fait plus planter le passage.** DVR injoignable : ERREUR
+claire (identifiants masqués), fenêtre reprise au passage suivant, curseur
+inchangé.
+
+**Inchangé :**
+- la limite de temps des passages ;
+- le redémarrage du dimanche 06:30 ;
+- la commande manuelle `sudo systemctl start suivi-dvr-redemarrage.service` ;
+- les unités systemd (aucune à réinstaller).
+
+Le disjoncteur garde désormais aussi le nombre d'échecs consécutifs. Un
+fichier écrit par l'ancien code est lu comme « 1 échec ».
+
+**Minutes manquantes du 15/10.** Pendant le blocage, le curseur est resté
+vers 08:00 : ces minutes ne sont pas perdues. Elles seront rattrapées
+automatiquement dès que le DVR répondra de nouveau, sans commande manuelle,
+à condition que ce soit avant la remise à jour de 8 h demain.
+
+## Commandes (une ligne chacune, depuis Termux/SSH, sans sudo pour git)
+
+(a) Mettre à jour (et installer le redémarrage du dimanche s'il ne l'est pas
+encore) :
+
+    cd ~/suivi-de-machine && git pull origin main && sudo cp deploy/suivi-dvr-redemarrage.service deploy/suivi-dvr-redemarrage.timer /etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl enable --now suivi-dvr-redemarrage.timer
+
+(b) Débloquer tout de suite sans attendre l'automatique (facultatif) :
+
+    sudo systemctl start suivi-dvr-redemarrage.service
+
+(c) Voir ce que fait la détection :
+
+    sudo journalctl -u suivi-machine-etat.service -n 30 --no-pager
+
+(d) Historique des redémarrages automatiques :
+
+    cat ~/suivi-de-machine/machine_etat/redemarrages_auto.json
+
+## Vérifications
+
+- `python3 -m unittest machine_etat.test_detecter_marche_arret` : **111/111**
+  (94 + 17 nouveaux). Les nouveaux tests couvrent :
+  - le compteur d'échecs : remis à zéro au retour du HTTP et au redémarrage ;
+  - la lecture d'un fichier de disjoncteur écrit par l'ancien code ;
+  - les limites : 1 par heure, 4 par jour puis de nouveau permis le
+    lendemain, désactivation par `.env`, historique gardé 7 jours ;
+  - l'ordre seul : une seule requête, identifiants absents de l'URL et
+    masqués dans les erreurs ;
+  - le 1er échec ne redémarre pas ;
+  - le 2e échec redémarre et ne lit rien ;
+  - pendant la pause de redémarrage, ni HTTP ni RTSP ;
+  - limite atteinte : RTSP, avec la raison dans le journal ;
+  - ordre non transmis : RTSP, et pas de nouvel essai immédiat ;
+  - RTSP injoignable : abandon sans plantage ;
+  - passage en attente du DVR : arrêt avec le code 0.
+
+  L'historique est redirigé vers un dossier temporaire pendant les tests.
+- `python3 -m unittest outils_zones.test_outils_zones` : 32/32.
+- **Non vérifié ici** (aucun accès DVR/Jetson) :
+  - la cause exacte du blocage du 15/10 ;
+  - le redémarrage automatique contre le vrai DVR. La requête est la même
+    que celle validée à la main le 14/10 à 23:52 (« 200 OK »).

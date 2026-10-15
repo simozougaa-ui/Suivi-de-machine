@@ -30,3 +30,8 @@ chaque jour à 08:00, saute le retard accumulé par
 détection, redémarre le DVR, vérifie qu'un téléchargement passe, puis relance
 la détection. Voir NOTES-SESSION.md, « DVR figé la nuit du 14/10 », pour
 l'installation en une ligne.
+
+En plus, depuis le 15/10, la détection redémarre elle-même le DVR si le
+téléchargement HTTP se fige deux fois de suite (au plus 1 fois par heure et
+4 fois par jour ; `DVR_REDEMARRAGE_AUTO=0` dans `.env` pour désactiver).
+Voir NOTES-SESSION.md, « 2e blocage le 15/10 ».

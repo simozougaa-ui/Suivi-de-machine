@@ -1,0 +1,18 @@
+[Unit]
+Description=Redemarrage hebdomadaire du DVR (dimanche 06:30)
+
+[Timer]
+# Jour et heure du redemarrage : SEULE ligne a modifier (puis
+# « sudo systemctl daemon-reload »). Dimanche 06:30 : pendant l'arret des
+# machines (6 h - 9 h) et avant la remise a jour de 8 h, qui absorbe le trou
+# de quelques minutes du redemarrage. Sans fuseau ecrit : heure du Jetson,
+# la meme que celle des journaux (voir suivi-machine-rattrapage.timer).
+OnCalendar=Sun *-*-* 06:30:00
+
+# Jetson eteint a l'heure prevue : pas de rattrapage plus tard dans la
+# journee (on ne redemarre pas le DVR en pleine production).
+Persistent=false
+AccuracySec=10s
+
+[Install]
+WantedBy=timers.target

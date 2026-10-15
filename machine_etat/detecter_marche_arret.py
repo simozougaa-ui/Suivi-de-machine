@@ -177,6 +177,16 @@ PLAFOND_RATTRAPAGE_MINUTES = FENETRE_MINUTES
 # (un seul passage par fenêtre, comme avant : enchaîner dépasserait le délai).
 BUDGET_RATTRAPAGE_S = 300
 
+# Limite de durée d'un passage imposée par systemd (TimeoutStartSec de
+# deploy/suivi-machine-etat.service) et marge gardée pour l'envoi. Sert à ne
+# lancer un secours RTSP que s'il a le temps d'aller au bout (2026-10-15) :
+# la nuit du 14/10, le secours démarrait trop tard, était tué, et la même
+# fenêtre recommençait en boucle sans jamais rien compter.
+TIMEOUT_SERVICE_S = 480
+MARGE_FIN_PASSAGE_S = 30
+# Durée de lecture RTSP relative à la vidéo (mesuré : 357,8 s pour 300 s).
+FACTEUR_DUREE_RTSP = 1.25
+
 # Verrou de passage (2026-10-03) : pris par tout passage AUTOMATIQUE et par
 # --repartir-a-jour, les deux seuls à écrire les curseurs. flock() est libéré
 # par le noyau dès que le processus meurt (même tué par systemd) : pas de
@@ -592,27 +602,66 @@ def config_lecture():
     return "http" if valeur == "http" else "rtsp"
 
 
-def lire_analyser(debut, fin, methode, garder_frames=None, calculer_machine2=True):
-    """Lit et classe une fenêtre par `methode` (« http » ou « rtsp »). En
-    http, retombe automatiquement sur RTSP pour CETTE fenêtre si le
-    téléchargement ou la lecture du fichier échoue (journalisé). Renvoie
-    (par_minute_m1, par_minute_m2, methode_utilisee)."""
+def temps_rtsp_suffisant(t_passage, debut, fin, horloge=time.monotonic):
+    """True si une lecture RTSP de [debut, fin] lancée MAINTENANT a le temps
+    de finir (envoi compris) avant que systemd ne tue le passage."""
+    besoin = (fin - debut).total_seconds() * FACTEUR_DUREE_RTSP + MARGE_FIN_PASSAGE_S
+    return (horloge() - t_passage) + besoin < TIMEOUT_SERVICE_S
+
+
+def lire_analyser(debut, fin, methode, garder_frames=None, calculer_machine2=True,
+                  t_passage=None):
+    """Lit et classe une fenêtre par `methode` (« http » ou « rtsp »).
+    Renvoie (par_minute_m1, par_minute_m2, methode_utilisee) avec
+    methode_utilisee parmi « http », « rtsp », « secours-rtsp »,
+    « rtsp-http-en-pause », ou « abandon » (m1 = m2 = None : rien lu, la
+    fenêtre sera reprise au prochain passage, curseur inchangé).
+
+    En http : si le téléchargement échoue, le disjoncteur met le HTTP en
+    pause (voir lecture_dvr.armer_disjoncteur) et le journal le dit en
+    ERREUR, avec la commande pour redémarrer le DVR ; pendant la pause, les
+    passages lisent directement en RTSP sans reperdre de temps ; après la
+    pause, le HTTP est retenté. `t_passage` (mode automatique) : un secours
+    RTSP n'est lancé que s'il a le temps de finir avant TimeoutStartSec."""
     if methode == "http":
-        try:
-            m1, m2, stats = analyser_fenetre_http(debut, fin, garder_frames, calculer_machine2)
-            logger.info(
-                "Lecture HTTP : %.1f Mo en %.1f s + lecture %.1f s "
-                "(%d/%d images).",
-                stats["octets"] / (1024 * 1024), stats["t_dl"], stats["t_lecture"],
-                stats["images"], stats["total"])
-            return m1, m2, "http"
-        except (lecture_dvr.ErreurTelechargement, lecture_dvr.ErreurLectureFichier) as e:
-            logger.warning("Lecture HTTP échouée (%s) — secours RTSP pour cette fenêtre.",
-                           lecture_dvr.masquer(e))
-            m1, m2 = analyser_fenetre(debut, fin, garder_frames, calculer_machine2)
-            return m1, m2, "secours-rtsp"
+        pause = lecture_dvr.http_en_pause()
+        if pause:
+            logger.warning(
+                "Lecture HTTP en pause jusqu'à %s (le DVR ne répond plus en "
+                "téléchargement depuis %s) — lecture RTSP, plus lente.",
+                pause["jusqua"].strftime("%H:%M"), pause["depuis"].strftime("%d/%m %H:%M"))
+            methode_rtsp = "rtsp-http-en-pause"
+        else:
+            try:
+                m1, m2, stats = analyser_fenetre_http(debut, fin, garder_frames, calculer_machine2)
+                logger.info(
+                    "Lecture HTTP : %.1f Mo en %.1f s + lecture %.1f s "
+                    "(%d/%d images).",
+                    stats["octets"] / (1024 * 1024), stats["t_dl"], stats["t_lecture"],
+                    stats["images"], stats["total"])
+                if lecture_dvr.liberer_disjoncteur():
+                    logger.info("Lecture HTTP rétablie : le DVR répond de nouveau.")
+                return m1, m2, "http"
+            except (lecture_dvr.ErreurTelechargement, lecture_dvr.ErreurLectureFichier) as e:
+                cause = lecture_dvr.masquer(e)
+                etat = lecture_dvr.armer_disjoncteur(cause)
+                logger.error(
+                    "DVR : le téléchargement HTTP ne répond plus (%s), en panne depuis "
+                    "%s. HTTP mis en pause %d min (lecture RTSP en attendant). Si ça "
+                    "dure, redémarrer le DVR : sudo systemctl start suivi-dvr-redemarrage.service",
+                    cause, etat["depuis"].strftime("%d/%m %H:%M"), lecture_dvr.PAUSE_HTTP_MIN)
+                methode_rtsp = "secours-rtsp"
+    else:
+        methode_rtsp = "rtsp"
+
+    if t_passage is not None and not temps_rtsp_suffisant(t_passage, debut, fin):
+        logger.error(
+            "Pas assez de temps pour lire %s -> %s en RTSP avant la limite de %d s "
+            "du service : fenêtre reprise au prochain passage (curseur inchangé).",
+            debut.strftime("%H:%M"), fin.strftime("%H:%M"), TIMEOUT_SERVICE_S)
+        return None, None, "abandon"
     m1, m2 = analyser_fenetre(debut, fin, garder_frames, calculer_machine2)
-    return m1, m2, "rtsp"
+    return m1, m2, methode_rtsp
 
 
 def classer(par_minute):
@@ -871,6 +920,9 @@ def main(argv=None):
     ap.add_argument("--comparer-lectures", action="store_true",
                     help="analyse la fenêtre --date/--debut/--fin par HTTP puis RTSP et compare "
                          "les minutes des deux (validation, n'envoie rien, n'écrit aucun curseur)")
+    ap.add_argument("--redemarrer-dvr", action="store_true",
+                    help="redémarre le DVR à distance, attend son retour et vérifie qu'un "
+                         "téléchargement passe (lancé par suivi-dvr-redemarrage.service)")
     ap.add_argument("--verbeux", action="store_true")
     args = ap.parse_args(argv)
 
@@ -883,6 +935,23 @@ def main(argv=None):
 
     machine2_active, machine2_id = config_machine2()
     machine1_id = id_machine1()
+
+    if args.redemarrer_dvr:
+        if args.date or args.debut or args.fin or args.sans_envoi \
+                or args.repartir_a_jour or args.comparer_lectures:
+            ap.error("--redemarrer-dvr s'utilise seul.")
+        verrou = prendre_verrou()
+        if verrou is None:
+            logger.error("Un passage de détection est en cours : rien n'a été fait. "
+                         "Utiliser : sudo systemctl start suivi-dvr-redemarrage.service "
+                         "(qui arrête la détection avant de redémarrer le DVR).")
+            return 1
+        try:
+            succes, message = lecture_dvr.redemarrer_dvr()
+        finally:
+            os.close(verrou)
+        (logger.info if succes else logger.error)("Redémarrage du DVR : %s", message)
+        return 0 if succes else 1
 
     if args.comparer_lectures:
         if not (args.date and args.debut and args.fin) or args.sans_envoi or args.repartir_a_jour:
@@ -941,41 +1010,65 @@ def main(argv=None):
 
 def _passage(ap, args, mode_auto, machine1_id, machine2_active, machine2_id, t_passage):
     """Un passage complet, appelé par main() une fois le verrou pris en mode
-    automatique. En mode manuel (--date/--debut/--fin) : une seule fenêtre.
-    En mode automatique avec lecture HTTP : enchaîne plusieurs fenêtres tant
-    qu'il reste du retard et que le budget de temps le permet (rattrapage)."""
+    automatique.
+
+    Mode manuel (--date/--debut/--fin) : la plage est traitée par morceaux de
+    FENETRE_MINUTES (comme le mode automatique), ce qui permet de récupérer
+    plusieurs heures d'un coup sans télécharger un fichier géant ; aucun
+    curseur n'est touché.
+
+    Mode automatique : enchaîne plusieurs fenêtres tant qu'il reste du
+    retard, que la lecture HTTP fonctionne, et que le budget de temps le
+    permet (rattrapage). Dès qu'une fenêtre n'a pas été lue en HTTP (DVR en
+    panne, lecture RTSP), le passage s'arrête après elle."""
     methode = config_lecture()
 
     if args.date and args.debut and args.fin:
         jour = datetime.strptime(args.date, "%Y-%m-%d").date()
         debut = datetime.combine(jour, datetime.strptime(args.debut, "%H:%M").time())
         fin = datetime.combine(jour, datetime.strptime(args.fin, "%H:%M").time())
-        ok, _ = _traiter_une_fenetre(debut, fin, methode, mode_auto, machine1_id,
-                                     machine2_active, machine2_id, args)
+        if fin <= debut:
+            ap.error("--fin doit être après --debut (même journée).")
+        tout_ok = True
+        morceau = debut
+        while morceau < fin:
+            fin_morceau = min(fin, morceau + timedelta(minutes=FENETRE_MINUTES))
+            ok, _, _ = _traiter_une_fenetre(morceau, fin_morceau, methode, mode_auto,
+                                            machine1_id, machine2_active, machine2_id, args)
+            tout_ok = tout_ok and ok
+            morceau = fin_morceau
         signaler_si_trop_long(time.monotonic() - t_passage, debut, fin)
-        return 0 if ok else 1
+        return 0 if tout_ok else 1
     if args.date or args.debut or args.fin:
         ap.error("--date, --debut et --fin vont ensemble.")
 
     machines_actives = [machine1_id] + ([machine2_id] if machine2_active else [])
     budget = BUDGET_RATTRAPAGE_S if methode == "http" else 0
-    premiere = True
+    premier_debut = dernier_fin = None
+    code = 0
     while True:
         debut, fin, retard_restant = fenetre_a_analyser(machines_actives)
         if debut is None:
-            if premiere:
+            if premier_debut is None:
                 logger.info("Rien de nouveau à analyser pour l'instant (déjà à jour avec le DVR).")
             break
-        premiere = False
-        ok, _ = _traiter_une_fenetre(debut, fin, methode, mode_auto, machine1_id,
-                                     machine2_active, machine2_id, args)
+        ok, _, methode_utilisee = _traiter_une_fenetre(
+            debut, fin, methode, mode_auto, machine1_id, machine2_active, machine2_id,
+            args, t_passage=t_passage)
+        if methode_utilisee == "abandon":
+            code = 1
+            break
+        if premier_debut is None:
+            premier_debut = debut
+        dernier_fin = fin
         if not ok:
             break   # échec d'envoi : le curseur n'a pas avancé, on réessaiera au prochain passage
+        if methode_utilisee != "http":
+            break   # lecture RTSP (lente) : une seule fenêtre par passage
         if retard_restant and retard_restant > timedelta(0):
             # Lecture HTTP rapide : on continue dans CE passage tant que le
             # budget tient, pour résorber le retard sans attendre 5 min à
-            # chaque fenêtre. En RTSP (budget 0), on s'arrête après une
-            # fenêtre (enchaîner dépasserait TimeoutStartSec).
+            # chaque fenêtre.
             if time.monotonic() - t_passage >= budget:
                 logger.info(
                     "Budget de rattrapage atteint (%d s) : %s de retard restent, "
@@ -984,23 +1077,31 @@ def _passage(ap, args, mode_auto, machine1_id, machine2_active, machine2_id, t_p
             continue
         break
 
-    signaler_si_trop_long(time.monotonic() - t_passage, debut, fin)
-    return 0
+    if dernier_fin is not None:
+        # Toute la vidéo traitée pendant ce passage, pas seulement la
+        # dernière fenêtre (sinon un rattrapage de 10 fenêtres en 300 s
+        # serait signalé à tort comme « plus long que la fenêtre »).
+        signaler_si_trop_long(time.monotonic() - t_passage, premier_debut, dernier_fin)
+    return code
 
 
 def _traiter_une_fenetre(debut, fin, methode, mode_auto, machine1_id,
-                         machine2_active, machine2_id, args):
+                         machine2_active, machine2_id, args, t_passage=None):
     """Lit, classe, journalise et (sauf --sans-envoi) envoie UNE fenêtre.
     Avance les curseurs via traiter_envoi_machine (après envoi réussi
-    seulement). Renvoie (succes, nb_minutes_classees)."""
+    seulement). Renvoie (succes, nb_minutes_classees, methode_utilisee) ;
+    methode_utilisee == « abandon » : rien lu, rien envoyé, curseur inchangé."""
     logger.info("Analyse des enregistrements de %s à %s (lecture %s, machine 2 %s)",
                 debut.strftime("%Y-%m-%d %H:%M"), fin.strftime("%H:%M"), methode,
                 "active" if machine2_active else "désactivée")
 
     debut_calcul = time.time()
     par_minute_m1, par_minute_m2, methode_utilisee = lire_analyser(
-        debut, fin, methode, args.garder_frames, calculer_machine2=machine2_active)
+        debut, fin, methode, args.garder_frames, calculer_machine2=machine2_active,
+        t_passage=t_passage)
     duree_calcul = time.time() - debut_calcul
+    if methode_utilisee == "abandon":
+        return False, 0, "abandon"
 
     lignes_m1 = classer(par_minute_m1)
     logger.info("Machine 1 : %d minute(s) classée(s) en %.1f s (lecture %s)",
@@ -1018,7 +1119,7 @@ def _traiter_une_fenetre(debut, fin, methode, mode_auto, machine1_id,
                         machine2_id, l["minute"], l["etat"], l["pourcentage"], l["secondes_analysees"])
 
     if args.sans_envoi:
-        return True, len(lignes_m1) + len(lignes_m2)
+        return True, len(lignes_m1) + len(lignes_m2), methode_utilisee
 
     url, jeton = config_api()
     # La file d'abord : sans ça, un long incident remettrait les minutes dans
@@ -1048,7 +1149,7 @@ def _traiter_une_fenetre(debut, fin, methode, mode_auto, machine1_id,
         ]
         reussite_m2 = traiter_envoi_machine(machine2_id, lignes_m2_a_envoyer, fin, url, jeton, mode_auto)
 
-    return (reussite_m1 and reussite_m2), len(lignes_m1) + len(lignes_m2)
+    return (reussite_m1 and reussite_m2), len(lignes_m1) + len(lignes_m2), methode_utilisee
 
 
 if __name__ == "__main__":

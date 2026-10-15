@@ -37,6 +37,27 @@ OCTETS_LIBRES_MIN = 50 * 1024 * 1024        # 50 Mo de plancher absolu
 
 TAILLE_MIN_FICHIER = 64 * 1024              # en dessous : fichier vide/erreur HTML
 
+# Délais (2026-10-15). Nuit du 14/10 : le service de téléchargement du DVR
+# s'est figé (connexion acceptée, puis plus aucune donnée). Avec l'ancien
+# réglage (2 essais, 120 s d'attente sans données chacun), un passage perdait
+# ~4 min 30 avant de passer au secours RTSP, qui était alors tué par
+# TimeoutStartSec=480 : boucle sans fin, rien compté pendant des heures.
+# Désormais : 30 s sans recevoir un octet = DVR figé (normalement le premier
+# octet arrive en < 1 s), un seul essai, et 120 s au total pour une fenêtre
+# lente mais vivante (mesuré : 5,6 Mo/30 s en 0,8 à 7 s, soit 8 à 70 s
+# pour 5 min).
+DELAI_INACTIVITE_S = 30
+DELAI_TOTAL_S = 120
+TENTATIVES_HTTP = 1
+
+# Disjoncteur : après un échec HTTP, les passages suivants lisent en RTSP
+# pendant PAUSE_HTTP_MIN au lieu de reperdre du temps sur un DVR figé, puis
+# le HTTP est retenté. Fichier d'état à côté de curseur.json (gitignoré).
+FICHIER_DISJONCTEUR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                   "http_en_panne.json")
+PAUSE_HTTP_MIN = 30
+FMT_ETAT = "%Y-%m-%dT%H:%M:%S"
+
 FMT_DAHUA = "%Y-%m-%d %H:%M:%S"
 
 
@@ -130,7 +151,8 @@ def _requests_get(url, auth, delai_connexion, delai_lecture):
                         timeout=(delai_connexion, delai_lecture))
 
 
-def telecharger_fenetre(debut, fin, delai_max=120, tentatives=2, session_get=None):
+def telecharger_fenetre(debut, fin, delai_max=DELAI_TOTAL_S, tentatives=TENTATIVES_HTTP,
+                        session_get=None, delai_inactivite=DELAI_INACTIVITE_S):
     """Télécharge [debut, fin] vers un fichier temporaire (flux direct sur
     disque, jamais tout en mémoire). Renvoie (chemin, octets). Lève
     ErreurTelechargement en cas d'échec après `tentatives` essais.
@@ -151,7 +173,7 @@ def telecharger_fenetre(debut, fin, delai_max=120, tentatives=2, session_get=Non
         fd, chemin = tempfile.mkstemp(dir=DOSSIER_TMP, suffix=".dav")
         try:
             os.chmod(chemin, 0o600)
-            octets = _ecrire_flux(fd, url, auth, delai_max, session_get)
+            octets = _ecrire_flux(fd, url, auth, delai_max, session_get, delai_inactivite)
             if octets < TAILLE_MIN_FICHIER:
                 raise ErreurTelechargement(
                     f"fichier trop petit ({octets} o) : réponse vide ou erreur DVR.")
@@ -169,15 +191,17 @@ def telecharger_fenetre(debut, fin, delai_max=120, tentatives=2, session_get=Non
     raise ErreurTelechargement(derniere or "échec inconnu")
 
 
-def _ecrire_flux(fd, url, auth, delai_max, session_get):
+def _ecrire_flux(fd, url, auth, delai_max, session_get, delai_inactivite=DELAI_INACTIVITE_S):
     """Écrit la réponse HTTP dans le descripteur `fd` (fermé ici). Renvoie le
-    nombre d'octets. Lève ErreurTelechargement sur HTTP != 200 ou délai."""
+    nombre d'octets. Lève ErreurTelechargement sur HTTP != 200 ou délai.
+    `delai_inactivite` borne l'attente SANS données (DVR figé) ; `delai_max`
+    borne la durée totale (DVR lent)."""
     t0 = time.monotonic()
     octets = 0
     reponse = None
     fd_pris = False
     try:
-        reponse = session_get(url, auth, 10, delai_max)
+        reponse = session_get(url, auth, 10, delai_inactivite)
         code = getattr(reponse, "status_code", 200)
         if code != 200:
             raise ErreurTelechargement(f"HTTP {code} (loadfile refusé/non supporté ?)")
@@ -253,3 +277,143 @@ def ouvrir_fichier(chemin, ouvrir_capture=None):
         _supprimer(chemin_mp4)
         raise ErreurLectureFichier("fichier illisible même après remuxage ffmpeg.")
     return capture, chemin_mp4
+
+
+# --- Disjoncteur « HTTP en panne » -------------------------------------------
+
+def _lire_etat_disjoncteur():
+    import json
+    try:
+        with open(FICHIER_DISJONCTEUR, encoding="utf-8") as f:
+            etat = json.load(f)
+        return {"depuis": datetime.strptime(etat["depuis"], FMT_ETAT),
+                "jusqua": datetime.strptime(etat["jusqua"], FMT_ETAT),
+                "cause": str(etat.get("cause", ""))}
+    except (FileNotFoundError, ValueError, KeyError, TypeError):
+        return None
+
+
+def http_en_pause(maintenant=None):
+    """État du disjoncteur s'il est ENCORE actif (dict depuis/jusqua/cause),
+    sinon None. Un fichier illisible compte comme « pas de pause »."""
+    etat = _lire_etat_disjoncteur()
+    if etat and (maintenant or datetime.now()) < etat["jusqua"]:
+        return etat
+    return None
+
+
+def armer_disjoncteur(cause, maintenant=None):
+    """Met le HTTP en pause PAUSE_HTTP_MIN minutes. Garde l'heure du PREMIER
+    échec (« depuis ») tant que le HTTP n'a pas été rétabli, pour que le
+    journal dise depuis quand le DVR ne répond plus. Écriture atomique."""
+    import json
+    from datetime import timedelta
+    t = (maintenant or datetime.now()).replace(microsecond=0)
+    ancien = _lire_etat_disjoncteur()
+    depuis = ancien["depuis"] if ancien else t
+    etat = {"depuis": depuis.strftime(FMT_ETAT),
+            "jusqua": (t + timedelta(minutes=PAUSE_HTTP_MIN)).strftime(FMT_ETAT),
+            "cause": masquer(cause)[:200]}
+    dossier = os.path.dirname(FICHIER_DISJONCTEUR)
+    fd, tmp = tempfile.mkstemp(dir=dossier, prefix=".http_en_panne.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(etat, f)
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, FICHIER_DISJONCTEUR)
+    except BaseException:
+        _supprimer(tmp)
+        raise
+    return {"depuis": depuis, "jusqua": t + timedelta(minutes=PAUSE_HTTP_MIN),
+            "cause": etat["cause"]}
+
+
+def liberer_disjoncteur():
+    """Supprime le disjoncteur. Renvoie True s'il existait (HTTP rétabli)."""
+    existait = os.path.exists(FICHIER_DISJONCTEUR)
+    _supprimer(FICHIER_DISJONCTEUR)
+    return existait
+
+
+# --- Redémarrage du DVR à distance -------------------------------------------
+
+def _url_base():
+    ip, _, _, _, port = _config_http()
+    return f"http://{ip}:{port}"
+
+
+def _dvr_repond(session_get, delai=5):
+    """True si le serveur web du DVR répond (n'importe quel code HTTP)."""
+    _, user, mdp, _, _ = _config_http()
+    try:
+        rep = session_get(_url_base() + "/cgi-bin/magicBox.cgi?action=getSystemInfo",
+                          (user, mdp), delai, delai)
+        try:
+            rep.close()
+        except Exception:  # noqa: BLE001
+            pass
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def redemarrer_dvr(session_get=None, attente_arret_s=90, attente_retour_s=300,
+                   pas_s=5, dormir=time.sleep, horloge=time.monotonic, verifier=None):
+    """Redémarre le DVR (magicBox.cgi?action=reboot, auth digest), attend
+    qu'il s'arrête puis revienne, puis vérifie qu'un VRAI téléchargement
+    passe (le module figé la nuit du 14/10 répondait encore au ping).
+    Libère le disjoncteur en cas de succès. Renvoie (succes, message).
+
+    Tout est injectable (session_get, dormir, horloge, verifier) pour les
+    tests : aucune attente réelle n'y est faite."""
+    session_get = session_get or _requests_get
+    _, user, mdp, _, _ = _config_http()
+    try:
+        rep = session_get(_url_base() + "/cgi-bin/magicBox.cgi?action=reboot",
+                          (user, mdp), 10, 20)
+        code = getattr(rep, "status_code", 200)
+        try:
+            rep.close()
+        except Exception:  # noqa: BLE001
+            pass
+        if code != 200:
+            return False, f"le DVR a refusé l'ordre de redémarrage (HTTP {code})."
+    except Exception as e:  # noqa: BLE001
+        return False, f"ordre de redémarrage non transmis : {masquer(e)}"
+    logger.info("Ordre de redémarrage accepté par le DVR, attente de son arrêt...")
+
+    t0 = horloge()
+    vu_arrete = False
+    while horloge() - t0 < attente_arret_s:
+        if not _dvr_repond(session_get):
+            vu_arrete = True
+            break
+        dormir(pas_s)
+    if not vu_arrete:
+        logger.warning("Le DVR n'a pas été vu arrêté en %d s (redémarrage très rapide "
+                       "ou ignoré) — on vérifie quand même.", attente_arret_s)
+
+    t1 = horloge()
+    while horloge() - t1 < attente_retour_s:
+        if _dvr_repond(session_get):
+            break
+        dormir(pas_s)
+    else:
+        return False, f"le DVR n'est pas revenu en {attente_retour_s} s — vérifier sur place."
+    logger.info("Le DVR répond de nouveau, vérification d'un téléchargement...")
+    dormir(20)   # le serveur web répond avant que l'enregistreur soit prêt
+
+    if verifier is None:
+        def verifier():
+            from datetime import timedelta
+            fin = datetime.now().replace(second=0, microsecond=0) - timedelta(minutes=10)
+            chemin, octets = telecharger_fenetre(fin - timedelta(seconds=30), fin,
+                                                 session_get=session_get)
+            _supprimer(chemin)
+            return octets
+    try:
+        octets = verifier()
+    except Exception as e:  # noqa: BLE001
+        return False, f"DVR revenu mais téléchargement toujours en échec : {masquer(e)}"
+    liberer_disjoncteur()
+    return True, f"DVR redémarré, téléchargement OK ({octets / (1024 * 1024):.1f} Mo pour 30 s)."

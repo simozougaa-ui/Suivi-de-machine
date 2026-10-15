@@ -1,0 +1,25 @@
+[Unit]
+Description=Redemarrage du DVR (debloque son service de telechargement HTTP)
+# Declenche chaque semaine par suivi-dvr-redemarrage.timer, ou a la main :
+#   sudo systemctl start suivi-dvr-redemarrage.service
+# Voir NOTES-SESSION.md, « DVR fige la nuit du 14/10 ».
+
+[Service]
+Type=oneshot
+# Le service entier tourne sous l'utilisateur du projet : la commande Python
+# (qui lit les identifiants du DVR dans .env) ne tourne jamais en root.
+User=mbelkhayat
+WorkingDirectory=/home/mbelkhayat/suivi-de-machine
+
+# Arrete la detection pendant le redemarrage (sinon ses passages echoueraient
+# et mettraient la lecture HTTP en pause pour rien). Prefixe « + » : seules
+# ces lignes systemctl ont les droits root.
+ExecStartPre=+systemctl stop suivi-machine-etat.timer suivi-machine-etat.service
+ExecStart=/home/mbelkhayat/suivi-de-machine/.venv/bin/python3 machine_etat/detecter_marche_arret.py --redemarrer-dvr
+
+# Relance la detection quelle que soit l'issue (succes, echec, delai depasse),
+# seulement si son timer est active (comme suivi-machine-rattrapage.service).
+ExecStopPost=+/bin/sh -c 'if systemctl is-enabled --quiet suivi-machine-etat.timer; then systemctl start --no-block suivi-machine-etat.timer; fi'
+
+# Ordre + arret (90 s maxi) + retour (300 s maxi) + verification (~2 min).
+TimeoutStartSec=600

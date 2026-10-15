@@ -56,3 +56,7 @@ __pycache__/
 # (machine_etat/detecter_marche_arret.py) : propres à chaque Jetson.
 machine_etat/passage.lock
 machine_etat/.curseur.*.tmp
+# Disjoncteur « lecture HTTP en panne » (machine_etat/lecture_dvr.py) : état
+# propre à chaque Jetson, jamais committé.
+machine_etat/http_en_panne.json
+machine_etat/.http_en_panne.*.tmp

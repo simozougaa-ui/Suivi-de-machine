@@ -19,6 +19,7 @@ Usage :
 import os
 import sys
 import tempfile
+import time
 import unittest
 from datetime import datetime, timedelta
 from unittest import mock
@@ -37,6 +38,23 @@ from detecter_marche_arret import (  # noqa: E402
 
 LARGEUR, HAUTEUR = 1280, 720
 GRIS_FOND = 100
+
+_DOSSIER_ETAT = None
+_DISJONCTEUR_ORIGINAL = None
+
+
+def setUpModule():
+    """Aucun test ne doit écrire le vrai disjoncteur machine_etat/http_en_panne.json
+    (un échec HTTP simulé l'armerait) : redirigé vers un dossier temporaire."""
+    global _DOSSIER_ETAT, _DISJONCTEUR_ORIGINAL
+    _DOSSIER_ETAT = tempfile.TemporaryDirectory()
+    _DISJONCTEUR_ORIGINAL = dma.lecture_dvr.FICHIER_DISJONCTEUR
+    dma.lecture_dvr.FICHIER_DISJONCTEUR = os.path.join(_DOSSIER_ETAT.name, "http_en_panne.json")
+
+
+def tearDownModule():
+    dma.lecture_dvr.FICHIER_DISJONCTEUR = _DISJONCTEUR_ORIGINAL
+    _DOSSIER_ETAT.cleanup()
 
 
 class FakeCapture:
@@ -1190,6 +1208,310 @@ class TestBudgetRattrapageSousTimeout(unittest.TestCase):
         # TimeoutStartSec=480 dans deploy/suivi-machine-etat.service.
         self.assertLess(dma.BUDGET_RATTRAPAGE_S, 480)
         self.assertGreater(dma.BUDGET_RATTRAPAGE_S, 0)
+
+
+# --- DVR figé la nuit du 14/10 : délais courts, disjoncteur, temps restant ---
+
+class _AvecDisjoncteurPropre(unittest.TestCase):
+    """Chaque test part d'un disjoncteur vide."""
+
+    def setUp(self):
+        dma.lecture_dvr.liberer_disjoncteur()
+
+    def tearDown(self):
+        dma.lecture_dvr.liberer_disjoncteur()
+
+
+class TestDisjoncteurHTTP(_AvecDisjoncteurPropre):
+    t0 = datetime(2026, 10, 14, 2, 45)
+
+    def test_arme_puis_expire_apres_la_pause(self):
+        dma.lecture_dvr.armer_disjoncteur("Read timed out", maintenant=self.t0)
+        self.assertIsNotNone(dma.lecture_dvr.http_en_pause(self.t0 + timedelta(minutes=10)))
+        self.assertIsNone(dma.lecture_dvr.http_en_pause(
+            self.t0 + timedelta(minutes=dma.lecture_dvr.PAUSE_HTTP_MIN, seconds=1)))
+
+    def test_garde_l_heure_du_premier_echec(self):
+        dma.lecture_dvr.armer_disjoncteur("a", maintenant=self.t0)
+        etat = dma.lecture_dvr.armer_disjoncteur("b", maintenant=self.t0 + timedelta(hours=5))
+        self.assertEqual(etat["depuis"], self.t0)
+
+    def test_liberer_dit_s_il_existait(self):
+        dma.lecture_dvr.armer_disjoncteur("x", maintenant=self.t0)
+        self.assertTrue(dma.lecture_dvr.liberer_disjoncteur())
+        self.assertFalse(dma.lecture_dvr.liberer_disjoncteur())
+
+    def test_fichier_illisible_ne_bloque_pas_le_http(self):
+        with open(dma.lecture_dvr.FICHIER_DISJONCTEUR, "w") as f:
+            f.write("{pas du json")
+        self.assertIsNone(dma.lecture_dvr.http_en_pause())
+
+    def test_identifiants_masques_dans_la_cause(self):
+        with mock.patch.dict(os.environ, {"DVR_PASSWORD": "Secret123"}):
+            etat = dma.lecture_dvr.armer_disjoncteur("http://admin:Secret123@1.2.3.4 refus")
+        self.assertNotIn("Secret123", etat["cause"])
+
+
+class TestDelaisTelechargementCourts(unittest.TestCase):
+    def test_un_seul_essai_et_30_s_sans_donnees(self):
+        appels = []
+
+        def session_get(url, auth, delai_connexion, delai_lecture):
+            appels.append(delai_lecture)
+            raise ConnectionError("Read timed out")
+
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(dma.lecture_dvr, "DOSSIER_TMP", d), \
+                mock.patch.dict(os.environ, {"DVR_IP": "1.2.3.4", "DVR_USER": "u",
+                                             "DVR_PASSWORD": "p", "CAMERA_CHANNEL": "15"}):
+            with self.assertRaises(dma.lecture_dvr.ErreurTelechargement):
+                dma.lecture_dvr.telecharger_fenetre(
+                    datetime(2026, 10, 14, 7, 55), datetime(2026, 10, 14, 8, 0),
+                    session_get=session_get)
+        self.assertEqual(appels, [30])   # 1 essai, 30 s sans données au plus
+
+
+class TestTempsRestantPourSecoursRTSP(unittest.TestCase):
+    debut = datetime(2026, 10, 14, 7, 55)
+    fin = datetime(2026, 10, 14, 8, 0)
+
+    def test_en_debut_de_passage_le_rtsp_tient(self):
+        self.assertTrue(dma.temps_rtsp_suffisant(1000.0, self.debut, self.fin, horloge=lambda: 1000.0))
+
+    def test_apres_4_min_30_perdues_le_rtsp_ne_tient_plus(self):
+        # Exactement la nuit du 14/10 : 270 s perdues en HTTP, puis 5 min de RTSP.
+        self.assertFalse(dma.temps_rtsp_suffisant(1000.0, self.debut, self.fin, horloge=lambda: 1270.0))
+
+
+class TestLireAnalyserDVRFige(_AvecDisjoncteurPropre):
+    debut = datetime(2026, 10, 14, 7, 55)
+    fin = debut + timedelta(seconds=2)
+
+    def _echec_http(self, *a, **k):
+        raise dma.lecture_dvr.ErreurTelechargement("Read timed out")
+
+    def test_echec_http_arme_le_disjoncteur_et_lit_en_rtsp(self):
+        frames = _frames_variees(2, 0)
+        with mock.patch.object(dma, "analyser_fenetre_http", side_effect=self._echec_http), \
+                mock.patch.object(dma, "open_stream", return_value=FakeCapture(frames)), \
+                mock.patch.object(dma, "build_rtsp_playback_url", return_value="rtsp://factice"), \
+                self.assertLogs("machine_etat", level="ERROR") as journal:
+            m1, m2, methode = dma.lire_analyser(self.debut, self.fin, "http",
+                                                t_passage=time.monotonic())
+        self.assertEqual(methode, "secours-rtsp")
+        self.assertTrue(m1)
+        self.assertIsNotNone(dma.lecture_dvr.http_en_pause())
+        self.assertIn("suivi-dvr-redemarrage", "\n".join(journal.output))
+
+    def test_pas_assez_de_temps_abandon_sans_lancer_le_rtsp(self):
+        rtsp = mock.MagicMock()
+        with mock.patch.object(dma, "analyser_fenetre_http", side_effect=self._echec_http), \
+                mock.patch.object(dma, "analyser_fenetre", rtsp), \
+                mock.patch.object(dma, "temps_rtsp_suffisant", return_value=False):
+            m1, m2, methode = dma.lire_analyser(self.debut, self.fin, "http", t_passage=0.0)
+        self.assertEqual(methode, "abandon")
+        self.assertIsNone(m1)
+        rtsp.assert_not_called()
+
+    def test_disjoncteur_actif_lit_en_rtsp_sans_retenter_le_http(self):
+        dma.lecture_dvr.armer_disjoncteur("Read timed out")
+        http = mock.MagicMock()
+        frames = _frames_variees(2, 0)
+        with mock.patch.object(dma, "analyser_fenetre_http", http), \
+                mock.patch.object(dma, "open_stream", return_value=FakeCapture(frames)), \
+                mock.patch.object(dma, "build_rtsp_playback_url", return_value="rtsp://factice"):
+            _, _, methode = dma.lire_analyser(self.debut, self.fin, "http",
+                                              t_passage=time.monotonic())
+        self.assertEqual(methode, "rtsp-http-en-pause")
+        http.assert_not_called()
+
+    def test_http_reussi_libere_le_disjoncteur_expire(self):
+        dma.lecture_dvr.armer_disjoncteur("x", maintenant=datetime(2020, 1, 1))   # expiré
+        frames = _frames_variees(2, 0)
+
+        def http_ok(d, f, garder_frames=None, calculer_machine2=True):
+            m1, m2, *_ = dma.analyser_capture(FakeCapture(frames), d, f, calculer_machine2)
+            return m1, m2, {"octets": 1, "t_dl": 0.1, "t_lecture": 0.1, "images": 30, "total": 30}
+
+        with mock.patch.object(dma, "analyser_fenetre_http", side_effect=http_ok), \
+                self.assertLogs("machine_etat", level="INFO") as journal:
+            _, _, methode = dma.lire_analyser(self.debut, self.fin, "http")
+        self.assertEqual(methode, "http")
+        self.assertFalse(os.path.exists(dma.lecture_dvr.FICHIER_DISJONCTEUR))
+        self.assertIn("rétablie", "\n".join(journal.output))
+
+
+class TestPassageAutomatique(_AvecDisjoncteurPropre):
+    """Boucle de _passage : plus de plantage quand il n'y a rien de nouveau,
+    arrêt après une fenêtre lue en RTSP, abandon propre, et garde-fou de
+    durée calculé sur TOUTE la vidéo du passage."""
+
+    def setUp(self):
+        super().setUp()
+        self._d = tempfile.TemporaryDirectory()
+        self._patches = [
+            mock.patch.object(dma, "FICHIER_VERROU", os.path.join(self._d.name, "l")),
+            mock.patch.dict(os.environ, {"LECTURE_DVR": "http", "MACHINE2_ACTIVE": "1"}),
+        ]
+        for p in self._patches:
+            p.start()
+
+    def tearDown(self):
+        for p in reversed(self._patches):
+            p.stop()
+        self._d.cleanup()
+        super().tearDown()
+
+    def _fenetres(self, n, retard=True):
+        t = datetime(2026, 10, 14, 7, 55)
+        fen = [(t + timedelta(minutes=5 * i), t + timedelta(minutes=5 * (i + 1)),
+                timedelta(minutes=30) if retard else timedelta(0)) for i in range(n)]
+        return fen + [(None, None, None)]
+
+    def test_rien_de_nouveau_ne_plante_plus(self):
+        with mock.patch.object(dma, "fenetre_a_analyser", return_value=(None, None, None)):
+            self.assertEqual(dma.main([]), 0)
+
+    def test_rattrapage_http_enchaine_et_garde_fou_sur_toute_la_video(self):
+        traiter = mock.MagicMock(return_value=(True, 10, "http"))
+        signaler = mock.MagicMock()
+        with mock.patch.object(dma, "fenetre_a_analyser", side_effect=self._fenetres(3)), \
+                mock.patch.object(dma, "_traiter_une_fenetre", traiter), \
+                mock.patch.object(dma, "signaler_si_trop_long", signaler):
+            self.assertEqual(dma.main([]), 0)
+        self.assertEqual(traiter.call_count, 3)
+        _, debut, fin = signaler.call_args[0]
+        self.assertEqual((debut, fin), (datetime(2026, 10, 14, 7, 55), datetime(2026, 10, 14, 8, 10)))
+
+    def test_fenetre_lue_en_rtsp_arrete_le_passage(self):
+        traiter = mock.MagicMock(return_value=(True, 10, "secours-rtsp"))
+        with mock.patch.object(dma, "fenetre_a_analyser", side_effect=self._fenetres(3)), \
+                mock.patch.object(dma, "_traiter_une_fenetre", traiter):
+            dma.main([])
+        self.assertEqual(traiter.call_count, 1)
+
+    def test_abandon_renvoie_une_erreur_sans_continuer(self):
+        traiter = mock.MagicMock(return_value=(False, 0, "abandon"))
+        signaler = mock.MagicMock()
+        with mock.patch.object(dma, "fenetre_a_analyser", side_effect=self._fenetres(3)), \
+                mock.patch.object(dma, "_traiter_une_fenetre", traiter), \
+                mock.patch.object(dma, "signaler_si_trop_long", signaler):
+            self.assertEqual(dma.main([]), 1)
+        self.assertEqual(traiter.call_count, 1)
+        signaler.assert_not_called()
+
+
+class TestRecuperationManuelleParMorceaux(unittest.TestCase):
+    def test_plage_decoupee_en_morceaux_de_5_minutes(self):
+        traiter = mock.MagicMock(return_value=(True, 5, "http"))
+        with mock.patch.object(dma, "_traiter_une_fenetre", traiter):
+            code = dma.main(["--date", "2026-10-14", "--debut", "02:45", "--fin", "03:02",
+                             "--sans-envoi"])
+        self.assertEqual(code, 0)
+        morceaux = [(c.args[0].strftime("%H:%M"), c.args[1].strftime("%H:%M"))
+                    for c in traiter.call_args_list]
+        self.assertEqual(morceaux, [("02:45", "02:50"), ("02:50", "02:55"),
+                                    ("02:55", "03:00"), ("03:00", "03:02")])
+        self.assertTrue(all(c.kwargs.get("t_passage") is None for c in traiter.call_args_list))
+
+
+class _ReponseFactice:
+    def __init__(self, code=200):
+        self.status_code = code
+
+    def close(self):
+        pass
+
+
+class TestRedemarrageDVR(_AvecDisjoncteurPropre):
+    def setUp(self):
+        super().setUp()
+        self._env = mock.patch.dict(os.environ, {"DVR_IP": "192.168.0.131", "DVR_USER": "admin",
+                                                 "DVR_PASSWORD": "Secret123", "CAMERA_CHANNEL": "15"})
+        self._env.start()
+
+    def tearDown(self):
+        self._env.stop()
+        super().tearDown()
+
+    def _session(self, etats_info, code_reboot=200):
+        """etats_info : suite de True (répond) / False (ne répond pas) pour les
+        sondages getSystemInfo successifs."""
+        urls = []
+        etats = list(etats_info)
+
+        def session_get(url, auth, dc, dl):
+            urls.append(url)
+            if "action=reboot" in url:
+                return _ReponseFactice(code_reboot)
+            if etats and etats.pop(0):
+                return _ReponseFactice(200)
+            raise ConnectionRefusedError("Connection refused")
+        return session_get, urls
+
+    def _horloge(self):
+        t = [0.0]
+
+        def horloge():
+            t[0] += 1.0
+            return t[0]
+        return horloge
+
+    def test_redemarre_attend_le_retour_verifie_et_libere(self):
+        dma.lecture_dvr.armer_disjoncteur("Read timed out")
+        session, urls = self._session([True, False, False, True])
+        succes, message = dma.lecture_dvr.redemarrer_dvr(
+            session_get=session, dormir=lambda s: None, horloge=self._horloge(),
+            verifier=lambda: 5_800_000)
+        self.assertTrue(succes, message)
+        self.assertIn("action=reboot", urls[0])
+        self.assertNotIn("Secret123", "".join(urls))   # identifiants jamais dans l'URL
+        self.assertIsNone(dma.lecture_dvr.http_en_pause())
+
+    def test_dvr_qui_ne_revient_pas(self):
+        session, _ = self._session([False] * 1000)
+        succes, message = dma.lecture_dvr.redemarrer_dvr(
+            session_get=session, dormir=lambda s: None, horloge=self._horloge(),
+            attente_retour_s=50, verifier=lambda: 1)
+        self.assertFalse(succes)
+        self.assertIn("pas revenu", message)
+
+    def test_ordre_refuse(self):
+        session, _ = self._session([], code_reboot=401)
+        succes, message = dma.lecture_dvr.redemarrer_dvr(
+            session_get=session, dormir=lambda s: None, horloge=self._horloge())
+        self.assertFalse(succes)
+        self.assertIn("401", message)
+
+    def test_revenu_mais_telechargement_toujours_en_echec(self):
+        dma.lecture_dvr.armer_disjoncteur("Read timed out")
+        session, _ = self._session([False, True])
+
+        def verifier():
+            raise dma.lecture_dvr.ErreurTelechargement("Read timed out")
+
+        succes, message = dma.lecture_dvr.redemarrer_dvr(
+            session_get=session, dormir=lambda s: None, horloge=self._horloge(), verifier=verifier)
+        self.assertFalse(succes)
+        self.assertIsNotNone(dma.lecture_dvr.http_en_pause())   # disjoncteur conservé
+
+
+class TestUnitesRedemarrageDVR(unittest.TestCase):
+    def test_python_jamais_en_root_et_detection_relancee(self):
+        service = _lire_unite("suivi-dvr-redemarrage.service")
+        self.assertIn(("User", "mbelkhayat"), service)
+        exec_start = [v for c, v in service if c == "ExecStart"]
+        self.assertEqual(len(exec_start), 1)
+        self.assertIn("--redemarrer-dvr", exec_start[0])
+        self.assertFalse(exec_start[0].startswith(("+", "!")))
+        d = dict(service)
+        self.assertIn("stop suivi-machine-etat.timer suivi-machine-etat.service", d["ExecStartPre"])
+        self.assertIn("start --no-block suivi-machine-etat.timer", d["ExecStopPost"])
+
+    def test_timer_hebdomadaire_sans_rattrapage(self):
+        timer = _lire_unite("suivi-dvr-redemarrage.timer")
+        self.assertEqual([v for c, v in timer if c == "OnCalendar"], ["Sun *-*-* 06:30:00"])
+        self.assertIn(("Persistent", "false"), timer)
 
 
 if __name__ == "__main__":

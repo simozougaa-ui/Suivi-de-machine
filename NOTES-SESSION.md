@@ -2581,3 +2581,132 @@ fichiers sont supprimés après chaque fenêtre) :
   pour le point 8).
 - Les chemins DVR/Jetson réels n'existent pas ici : tout ce qui touche au
   réseau est testé avec des doubles, jamais contre un vrai DVR.
+
+---
+
+# DVR figé la nuit du 14/10 : délais courts, disjoncteur, redémarrage du DVR (2026-10-15)
+
+## Ce qui s'est passé
+
+Vers 02:45 le 14/10, le service de téléchargement HTTP du DVR (`loadfile.cgi`,
+port 80) s'est figé : il acceptait la connexion puis n'envoyait plus rien
+(« Read timed out »), même pour des heures qui marchaient la veille. Le ping
+répondait, et DMSS (qui passe par un autre service du DVR) affichait le
+direct. Un redémarrage à distance du DVR (`magicBox.cgi?action=reboot`) l'a
+débloqué : 5,7 Mo pour 30 s de vidéo en 0,8 s.
+
+Pendant ce temps, le programme tournait en boucle sans rien compter : 2
+essais HTTP de 2 min chacun (~4 min 30 perdues), puis un secours RTSP qui
+démarrait trop tard et était tué par `TimeoutStartSec=480`. Le curseur ne
+bougeait pas, la même fenêtre recommençait à chaque passage. À 8 h, la remise
+à jour quotidienne a placé le curseur à 07:55 : le trou 02:45 → 07:55 sur la
+frise vient de là (vidéo toujours sur le DVR, récupérable, voir plus bas).
+Défaut de conception de ma bascule HTTP : le temps perdu par un échec HTTP
+n'était pas compté dans la limite d'un passage.
+
+## Corrections (décisions autonomes)
+
+**Échec HTTP détecté en 30 s.** `lecture_dvr.py` : 30 s sans recevoir un
+seul octet = DVR figé (normalement le premier octet arrive en moins d'1 s),
+un seul essai, et 120 s au total pour une fenêtre lente mais vivante (mesuré
+jusqu'à ~70 s pour 5 min juste après un redémarrage).
+
+**Disjoncteur « HTTP en panne ».** Après un échec, le journal écrit une
+ERREUR claire (« DVR : le téléchargement HTTP ne répond plus …, en panne
+depuis …, redémarrer le DVR : sudo systemctl start
+suivi-dvr-redemarrage.service »), et le HTTP est mis en pause 30 min
+(`machine_etat/http_en_panne.json`, gitignoré, écriture atomique). Pendant la
+pause, les passages lisent directement en RTSP (lent, mais ça compte) au lieu
+de reperdre du temps ; après la pause le HTTP est retenté ; dès qu'il réussit,
+le disjoncteur est levé (« Lecture HTTP rétablie »). L'heure du PREMIER
+échec est gardée, pour que le journal dise depuis quand le DVR ne répond plus.
+
+**Le secours RTSP ne démarre que s'il a le temps de finir.** Avant de lancer
+une lecture RTSP en mode automatique, le passage vérifie : temps écoulé +
+durée de vidéo × 1,25 (mesuré 357,8 s pour 300 s) + 30 s d'envoi < 480 s.
+Sinon il s'arrête proprement (« Pas assez de temps … fenêtre reprise au
+prochain passage », code de sortie 1), curseur inchangé — plus jamais tué
+par systemd au milieu. Avec le disjoncteur, le passage suivant part
+directement en RTSP dès le début et tient dans la limite (405 s < 480).
+
+**Rattrapage.** Un passage n'enchaîne plus de fenêtres après une fenêtre lue
+en RTSP (lente). Corrigé aussi : l'avertissement « passage plus long que la
+fenêtre » compare maintenant la durée du passage à TOUTE la vidéo traitée
+(et non à la dernière fenêtre, ce qui aurait donné de fausses alertes en
+rattrapage) ; et un passage sans rien de nouveau ne plante plus en fin de
+passage (bug relevé le 14/10).
+
+**Récupération d'une plage manquée par morceaux.** En mode manuel
+(`--date --debut --fin`), la plage est maintenant traitée par fenêtres de
+5 min (comme le mode automatique) : on peut récupérer des heures d'un coup
+sans télécharger un fichier géant. Aucun curseur n'est touché ; les minutes
+sont envoyées (l'API remplace sans dupliquer). Conséquence : la première
+seconde de chaque morceau n'a pas de seconde précédente pour la machine 1
+(59 s au lieu de 60 dans la minute), exactement comme en mode automatique.
+
+**Redémarrage du DVR, automatique ou à la main.** Nouvelle option
+`--redemarrer-dvr` : ordre de redémarrage (auth digest, identifiants jamais
+dans l'URL ni le journal), attente de l'arrêt (90 s maxi) puis du retour
+(5 min maxi), puis vérification d'un VRAI téléchargement de 30 s (le module
+figé répondait encore au ping : seul un téléchargement prouve que c'est
+réparé) ; si ça marche, le disjoncteur est levé. Unités
+`deploy/suivi-dvr-redemarrage.service` + `.timer` : le service arrête la
+détection, redémarre le DVR, puis relance la détection quelle que soit
+l'issue (même modèle que le rattrapage de 8 h, Python jamais en root). Le
+timer le fait chaque **dimanche à 06:30** (pendant l'arrêt des machines,
+avant la remise à jour de 8 h qui absorbe les quelques minutes de
+redémarrage), `Persistent=false`. L'enregistrement s'interrompt 2 à 3 min.
+Pas de redémarrage automatique dès qu'une panne est détectée : ce serait
+couper l'enregistrement en pleine production sans décision humaine ; le
+journal donne la commande à lancer.
+
+## Commandes (une ligne chacune, depuis Termux/SSH)
+
+(a) Mettre à jour et installer le redémarrage hebdomadaire :
+
+    cd ~/suivi-de-machine && git pull origin main && sudo cp deploy/suivi-dvr-redemarrage.service deploy/suivi-dvr-redemarrage.timer /etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl enable --now suivi-dvr-redemarrage.timer
+
+(b) Redémarrer le DVR tout de suite (si le journal dit « le téléchargement
+HTTP ne répond plus ») :
+
+    sudo systemctl start suivi-dvr-redemarrage.service
+
+(c) Résultat du dernier redémarrage :
+
+    sudo journalctl -u suivi-dvr-redemarrage.service -n 20 --no-pager
+
+(d) Prochain redémarrage prévu :
+
+    systemctl list-timers suivi-dvr-redemarrage.timer --no-pager
+
+(e) Récupérer les minutes sautées le 14/10 (02:45 → 07:55) — à lancer une
+fois le retard du jour rattrapé (pour ne pas charger le DVR avec deux
+lectures en même temps) :
+
+    cd ~/suivi-de-machine && .venv/bin/python3 machine_etat/detecter_marche_arret.py --date 2026-10-14 --debut 02:45 --fin 07:55
+
+(f) Désactiver le redémarrage hebdomadaire :
+
+    sudo systemctl disable --now suivi-dvr-redemarrage.timer
+
+## Vérifications
+
+- `python3 -m unittest machine_etat.test_detecter_marche_arret` : 94/94
+  (71 + 23 nouveaux : disjoncteur — armement, expiration, heure du premier
+  échec, levée, fichier illisible, identifiants masqués — ; un seul essai
+  et 30 s sans données ; temps restant pour le secours RTSP, dont le cas
+  exact de la nuit du 14/10 ; échec HTTP → RTSP + ERREUR avec la commande ;
+  pas assez de temps → abandon sans lancer le RTSP ; disjoncteur actif → pas
+  de nouvel essai HTTP ; HTTP rétabli → disjoncteur levé ; passage sans
+  rien de nouveau sans plantage ; rattrapage HTTP enchaîné avec garde-fou
+  sur toute la vidéo ; arrêt après une fenêtre RTSP ; abandon → code 1 ;
+  récupération manuelle par morceaux de 5 min ; redémarrage du DVR —
+  succès, DVR qui ne revient pas, ordre refusé, revenu mais toujours figé —
+  ; invariants des nouvelles unités). Le disjoncteur est redirigé vers un
+  dossier temporaire pendant les tests (aucun fichier laissé dans le dépôt).
+- `python3 -m unittest outils_zones.test_outils_zones` : 32/32.
+- `systemd-analyze verify` sur les nouvelles unités (et celles de détection) :
+  aucun avertissement ; `Sun *-*-* 06:30:00` → dimanche 06:30.
+- **Non vérifié ici** (aucun accès DVR/Jetson) : le redémarrage réel par la
+  nouvelle unité (la même commande `magicBox.cgi?action=reboot` a été validée
+  à la main le 14/10 à 23:52 : « 200 OK », DVR revenu et téléchargement OK).

@@ -23,3 +23,10 @@ l'authentification.
 chaque jour à 08:00, saute le retard accumulé par
 `suivi-machine-etat` (voir NOTES-SESSION.md, « Remise à jour quotidienne à
 8 h », pour l'installation en une ligne et le fonctionnement).
+
+## Redémarrage du DVR (chaque dimanche 06:30, ou à la main)
+
+`suivi-dvr-redemarrage.timer` + `suivi-dvr-redemarrage.service` : arrête la
+détection, redémarre le DVR, vérifie qu'un téléchargement passe, puis relance
+la détection. Voir NOTES-SESSION.md, « DVR figé la nuit du 14/10 », pour
+l'installation en une ligne.

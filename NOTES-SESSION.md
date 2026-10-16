@@ -3263,3 +3263,47 @@ derrière, et les deux zones donnent un chiffre identique : toute l'image
 change. Une seconde où toute l'image bouge ne devra pas compter.
 
 Tests : outils_zones 47/47.
+
+## Caméra 10, étape 6 : zones de nuit validées, Encolleuse 2 ACTIVÉE
+
+Cinq zones candidates, en haut à droite (sortie de la machine), mesurées à
+10 heures connues (60 s, % de secondes en mouvement ; réalité donnée par
+le patron, dont la pause de 01:10 qu'il a demandé de regarder) :
+
+| Heure | Réalité | A 548,172,588,192 | B 576,163,616,183 | autres |
+|---|---|---|---|---|
+| 15/10 19:50 | marche | 73,3 | 53,3 | 25 / 53 / 17 |
+| 15/10 21:00 | marche | 76,7 | 1,7 | 10 / 10 / 2 |
+| 15/10 22:30 | marche (très lente) | **18,3** | 0,0 | 0 / 0 / 0 |
+| 16/10 04:00 | marche | 30,0 | 50,0 | 48 / 3 / 23 |
+| 15/10 07:00, 11:00, 13:15 | arrêt | 0,0 | 0,0 | 0 |
+| 16/10 01:10 | pause | 1,7 | 0,0 | 0 |
+| 16/10 01:15 | pause | **5,0** | 1,7 | ≤ 1,7 |
+| 16/10 05:30 | arrêt | 0,0 | 1,7 | ≤ 1,7 |
+
+Décisions :
+- **Zones :** A et B. La seconde est en mouvement si au moins une des
+  deux bouge. A sépare à elle seule les 10 heures ; B rattrape la marche
+  de 04:00 (50 %).
+- **Seuil propre à l'Encolleuse 2 :** « marche » si plus de **12 %** des
+  secondes sont en mouvement (pas 40 % comme Bob B / Bob C). La machine a
+  plusieurs vitesses et avance par à-coups la nuit. 12 % se place entre
+  l'arrêt le plus haut (5 %) et la marche la plus lente (18,3 %).
+  `classer()` prend maintenant un seuil (40 par défaut, inchangé pour Bob B
+  / Bob C).
+- **Image perturbée :** à 00:00, l'image de la caméra 10 est noire ou
+  clignotante, et les deux anciennes zones donnaient le même 77 %. Si plus
+  de 50 % de TOUTE l'image (réduite à 160×90) bouge dans une seconde, la
+  seconde est ignorée : ni marche ni arrêt.
+- **Activée par défaut :** `active_par_defaut` passe à « 1 », donc le
+  `git pull` l'active. `MACHINE3_ACTIVE=0` dans `.env` la coupe.
+
+LIMITE : la marge est faible pour une marche très lente (18,3 % à 22:30,
+une seule mesure). Le journal affiche le % de chaque minute de
+`machine-3`. Si des minutes de marche lente sortent en « arrêt », baisser
+`seuil_minute_pourcent`, mais pas sous ~8 % (la pause monte à 5 %).
+
+Tests : 137/137 (+2 : seuil de 12 % pour une marche lente de nuit, avec
+la pause qui reste un arrêt ; image qui clignote ignorée). outils_zones
+47/47.
+Non vérifié ici : le passage réel sur le Jetson avec les deux caméras.

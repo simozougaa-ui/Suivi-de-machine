@@ -1911,7 +1911,7 @@ class CaptureCouleur:
             return False, None
         img = np.full((360, 700, 3), 100, dtype=np.uint8)
         if self.bouge(self.i) and self.i % 2:
-            img[175:186, 570:615] = 220
+            img[174:190, 550:586] = 220       # zone A (548,172,588,192)
         self.i += 1
         return True, img
 
@@ -1923,9 +1923,13 @@ class TestCamera10Encolleuse2(_AvecDisjoncteurPropre):
     debut = datetime(2026, 10, 15, 19, 50)
     cam = dict(dma.CAMERAS_SUPPLEMENTAIRES[0], machine_id="machine-3")
 
-    def test_configuration_et_desactivee_par_defaut(self):
+    def test_configuration_et_active_par_defaut_depuis_la_nuit(self):
         self.assertEqual((self.cam["canal"], self.cam["nom"]), (10, "Encolleuse 2"))
+        self.assertEqual(self.cam["seuil_minute_pourcent"], 12.0)
         with mock.patch.dict(os.environ, {"MACHINE3_ACTIVE": ""}):
+            self.assertEqual([c["machine_id"] for c in dma.cameras_supplementaires_actives()],
+                             ["machine-3"])
+        with mock.patch.dict(os.environ, {"MACHINE3_ACTIVE": "0"}):
             self.assertEqual(dma.cameras_supplementaires_actives(), [])
         with mock.patch.dict(os.environ, {"MACHINE3_ACTIVE": "1", "MACHINE3_ETAT_ID": "enc-2"}):
             self.assertEqual([c["machine_id"] for c in dma.cameras_supplementaires_actives()], ["enc-2"])
@@ -1939,6 +1943,34 @@ class TestCamera10Encolleuse2(_AvecDisjoncteurPropre):
         lignes = dma.classer(par_minute)
         self.assertEqual([l["etat"] for l in lignes], ["marche", "arret"])
 
+    def test_seuil_propre_12_pourcent_marche_lente_de_nuit(self):
+        # 15 s en mouvement sur 60 (25 %) : « arrêt » pour Bob B / Bob C (40 %),
+        # « marche » pour l'Encolleuse 2 (12 %) ; 3 s sur 60 (5 %, la pause
+        # de 01:15) : « arrêt ».
+        lent = dma.classer({self.debut: (15, 60)}, self.cam["seuil_minute_pourcent"])
+        self.assertEqual(lent[0]["etat"], "marche")
+        self.assertEqual(dma.classer({self.debut: (15, 60)})[0]["etat"], "arret")
+        pause = dma.classer({self.debut: (3, 60)}, self.cam["seuil_minute_pourcent"])
+        self.assertEqual(pause[0]["etat"], "arret")
+
+    def test_image_qui_clignote_ignoree(self):
+        class Clignote:
+            def __init__(self):
+                self.i = 0
+
+            def read(self):
+                if self.i >= 60 * 15:
+                    return False, None
+                self.i += 1
+                v = 0 if self.i % 2 else 200          # image noire une fois sur deux
+                return True, np.full((360, 700, 3), v, dtype=np.uint8)
+
+        with self.assertLogs("machine_etat", level="WARNING") as journal:
+            par_minute, _, _ = dma.analyser_capture_zones(
+                Clignote(), self.debut, self.debut + timedelta(minutes=1), self.cam["zones"])
+        self.assertEqual(par_minute, {})          # rien compté : ni marche ni arrêt
+        self.assertIn("perturbée", "\n".join(journal.output))
+
     def test_une_seule_zone_qui_bouge_suffit(self):
         cap = CaptureCouleur(60 * 15, lambda i: True)     # seule la zone 1 bouge
         par_minute, _, _ = dma.analyser_capture_zones(
@@ -1947,7 +1979,13 @@ class TestCamera10Encolleuse2(_AvecDisjoncteurPropre):
 
     def test_flou_du_rectangle_identique_au_flou_de_l_image_entiere(self):
         rng = np.random.default_rng(3)
-        images = [rng.integers(0, 255, (360, 700, 3), dtype=np.uint8) for _ in range(15)]
+        images = []
+        for _ in range(15):
+            img = np.full((360, 700, 3), 100, dtype=np.uint8)
+            # Bruit seulement autour des zones (le reste de l'image est fixe,
+            # sinon la seconde serait ignorée comme image perturbée).
+            img[150:200, 530:640] = rng.integers(0, 255, (50, 110, 3), dtype=np.uint8)
+            images.append(img)
 
         class Cap:
             def __init__(self):

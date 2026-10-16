@@ -145,26 +145,45 @@ SEUIL_FRACTION_M2 = 0.05
 # mouvement » si AU MOINS UNE zone dépasse seuil_fraction (une personne qui
 # masque une zone ne masque pas l'autre). Règle des 40 % pour la minute.
 #
-# Encolleuse 2, caméra 10 : deux petites zones sur sa ligne de transport,
-# choisies avec outils_zones/carte_mouvement.py (carte du 15/10 19:50), loin
-# des passages. Mesures de référence (60 s, % de secondes en mouvement) :
-#                       zone 1 (sortie)   zone 2 (bas gauche)
-#   marche  15/10 19:50     73,3 %             81,7 %
-#   arrêt   15/10 07:00      0,0 %              0,0 %
-#   arrêt   15/10 11:00      0,0 %              0,0 %   (arrêt confirmé)
-#   pause   15/10 13:15      0,0 %              0,0 %
-# LIMITE : une seule minute de marche mesurée (19:50) ; rien de nuit. Le
-# journal affiche le % de chaque minute pour réajuster sans deviner.
-# Désactivée par défaut (active_par_defaut) tant que la marche de NUIT n'est
-# pas validée ; MACHINE3_ACTIVE=1 / 0 dans .env force l'un ou l'autre ;
-# identifiant : MACHINE3_ETAT_ID (défaut machine-3, nommée « Encolleuse 2 »
-# dans l'application).
+# Encolleuse 2, caméra 10 (2026-10-16). Zones choisies avec
+# outils_zones/carte_mouvement.py (cartes de COMPARAISON marche / arrêt), en
+# haut à droite, vers la sortie de la machine. Les zones de jour d'abord
+# retenues (565,170,620,190 et 275,266,320,284) ne valaient rien la nuit :
+# la seconde voyait le bruit de l'image (100 % pendant la pause de 01:15) et
+# la première ratait la machine lente (0 % à 22:30, 37 % à 04:00).
+#
+# Mesures de référence (60 s, % de secondes en mouvement ; réalité donnée
+# par le patron) :
+#                         zone A 548,172,588,192   zone B 576,163,616,183
+#   marche  15/10 19:50          73,3                    53,3
+#   marche  15/10 21:00          76,7                     1,7
+#   marche  15/10 22:30          18,3   (très lente)      0,0
+#   marche  16/10 04:00          30,0                    50,0
+#   arrêt   15/10 07:00 / 11:00 / 13:15   0,0            0,0
+#   arrêt   16/10 01:10           1,7                     0,0
+#   arrêt   16/10 01:15 (pause)   5,0                     1,7
+#   arrêt   16/10 05:30           0,0                     1,7
+# La machine a plusieurs vitesses et avance par à-coups la nuit : elle ne
+# bouge jamais 40 % du temps comme Bob B / Bob C. Seuil PROPRE à elle :
+# « marche » si plus de 12 % des secondes sont en mouvement (entre l'arrêt
+# le plus haut, 5 %, et la marche la plus lente, 18,3 %). La seconde est en
+# mouvement si AU MOINS UNE des deux zones bouge.
+# LIMITE : marge faible pour une marche très lente (18,3 % à 22:30, une
+# seule mesure) ; le journal affiche le % de chaque minute pour réajuster.
+# Activée par défaut depuis la validation de nuit ; MACHINE3_ACTIVE=0 dans
+# .env la coupe ; identifiant : MACHINE3_ETAT_ID (défaut machine-3, nommée
+# « Encolleuse 2 » dans l'application).
 CAMERAS_SUPPLEMENTAIRES = (
     {"cle": "MACHINE3", "machine_id": "machine-3", "nom": "Encolleuse 2", "canal": 10,
-     "zones": ((565, 170, 620, 190), (275, 266, 320, 284)),
+     "zones": ((548, 172, 588, 192), (576, 163, 616, 183)),
      "flou": (5, 5), "seuil_amplitude": 25, "seuil_fraction": 0.05,
-     "active_par_defaut": "0"},
+     "seuil_minute_pourcent": 12.0, "active_par_defaut": "1"},
 )
+# Image perturbée (16/10, 00:00 sur la caméra 10 : image noire / clignotante,
+# toutes les zones « bougent » ensemble) : si plus de cette part de TOUTE
+# l'image (réduite) bouge dans une seconde, la seconde n'est pas comptée.
+SEUIL_IMAGE_PERTURBEE = 0.5
+TAILLE_IMAGE_CONTROLE = (160, 90)
 # Une fenêtre de caméra supplémentaire ne démarre que s'il reste de quoi la
 # finir (téléchargement au pire DELAI_TOTAL_S + analyse) avant TimeoutStartSec.
 DUREE_MAX_FENETRE_SUPP_S = 180
@@ -406,8 +425,10 @@ def analyser_capture_zones(capture, debut, fin, zones, flou=(5, 5), seuil_amplit
     """Classe chaque seconde de [debut, fin) d'une caméra supplémentaire :
     « en mouvement » si AU MOINS UNE des `zones` a plus de `seuil_fraction`
     de pixels dont l'amplitude (max - min sur les `pas` images de la
-    seconde) dépasse `seuil_amplitude`. Même modèle de temps
-    qu'analyser_capture (image d'index i = debut + i/pas).
+    seconde) dépasse `seuil_amplitude`. Une seconde où plus de
+    SEUIL_IMAGE_PERTURBEE de TOUTE l'image (réduite) bouge est ignorée
+    (image noire / clignotante). Même modèle de temps qu'analyser_capture
+    (image d'index i = debut + i/pas).
 
     Pour ne pas flouter toute l'image (le Jetson lit aussi la caméra 15), le
     gris + flou est fait sur le rectangle englobant les zones, élargi de la
@@ -426,24 +447,36 @@ def analyser_capture_zones(capture, debut, fin, zones, flou=(5, 5), seuil_amplit
     bx2 = max(z[2] for z in zones) + marge
     by2 = max(z[3] for z in zones) + marge
     total_images = duree * pas
-    par_minute, tampon, index = {}, [], 0
+    par_minute, tampon, controle, index = {}, [], [], 0
+    perturbees = 0
     while index < total_images:
         ok, frame = capture.read()
         if not ok:
             break
         morceau = cv2.cvtColor(frame[by1:by2, bx1:bx2], cv2.COLOR_BGR2GRAY)
         tampon.append(cv2.GaussianBlur(morceau, flou, 0))
+        petite = cv2.resize(frame, TAILLE_IMAGE_CONTROLE, interpolation=cv2.INTER_AREA)
+        controle.append(cv2.cvtColor(petite, cv2.COLOR_BGR2GRAY))
         if len(tampon) == pas:
-            pile = np.stack(tampon, axis=0).astype(np.int16)
-            bouge = (pile.max(axis=0) - pile.min(axis=0)) > seuil_amplitude
-            en_mouvement = any(
-                bouge[z[1] - by1:z[3] - by1, z[0] - bx1:z[2] - bx1].mean() > seuil_fraction
-                for z in zones)
-            minute = (debut + timedelta(seconds=index // pas)).replace(second=0, microsecond=0)
-            avec, total = par_minute.get(minute, (0, 0))
-            par_minute[minute] = (avec + (1 if en_mouvement else 0), total + 1)
-            tampon = []
+            pile_c = np.stack(controle, axis=0).astype(np.int16)
+            if ((pile_c.max(axis=0) - pile_c.min(axis=0)) > seuil_amplitude).mean() > SEUIL_IMAGE_PERTURBEE:
+                # Toute l'image change (noire, clignote) : seconde ignorée,
+                # ni marche ni arrêt.
+                perturbees += 1
+            else:
+                pile = np.stack(tampon, axis=0).astype(np.int16)
+                bouge = (pile.max(axis=0) - pile.min(axis=0)) > seuil_amplitude
+                en_mouvement = any(
+                    bouge[z[1] - by1:z[3] - by1, z[0] - bx1:z[2] - bx1].mean() > seuil_fraction
+                    for z in zones)
+                minute = (debut + timedelta(seconds=index // pas)).replace(second=0, microsecond=0)
+                avec, total = par_minute.get(minute, (0, 0))
+                par_minute[minute] = (avec + (1 if en_mouvement else 0), total + 1)
+            tampon, controle = [], []
         index += 1
+    if perturbees:
+        logger.warning("Image perturbée (toute l'image change) pendant %d seconde(s) : "
+                       "non comptées.", perturbees)
     return par_minute, index, total_images
 
 
@@ -505,7 +538,8 @@ def traiter_camera_supplementaire(cam, debut, fin, mode_auto, args):
     par_minute, methode = lire_camera_supplementaire(cam, debut, fin)
     if par_minute is None:
         return False, methode
-    lignes = lignes_coupure(debut, fin) if methode == SANS_ENREGISTREMENT else classer(par_minute)
+    lignes = (lignes_coupure(debut, fin) if methode == SANS_ENREGISTREMENT
+              else classer(par_minute, cam.get("seuil_minute_pourcent", SEUIL_MINUTE_POURCENT)))
     logger.info("%s (%s) : %d minute(s) classée(s)", cam["nom"], cam["machine_id"], len(lignes))
     for l in lignes:
         logger.info("  %s  %s  %-7s  %5.1f %% de secondes en mouvement (%d s)",
@@ -982,7 +1016,7 @@ def redemarrage_automatique(etat, cause):
     return True
 
 
-def classer(par_minute):
+def classer(par_minute, seuil_pourcent=SEUIL_MINUTE_POURCENT):
     """Transforme les compteurs en lignes prêtes pour l'API. Commun aux deux
     machines (même SEUIL_MINUTE_POURCENT, même format de sortie).
 
@@ -1002,7 +1036,7 @@ def classer(par_minute):
         pourcentage = 100.0 * avec / total
         lignes.append({
             "minute": minute.strftime("%Y-%m-%dT%H:%M"),
-            "etat": "marche" if pourcentage > SEUIL_MINUTE_POURCENT else "arret",
+            "etat": "marche" if pourcentage > seuil_pourcent else "arret",
             "pourcentage": round(pourcentage, 1),
             "secondes_analysees": total,
         })

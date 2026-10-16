@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _commun  # noqa: E402
 import carte_mouvement  # noqa: E402
+import image_perturbee  # noqa: E402
 import quadrillage  # noqa: E402
 import seuils  # noqa: E402
 import vitesse_lecture  # noqa: E402
@@ -277,6 +278,52 @@ class TestCarteMouvement(unittest.TestCase):
     def test_aucune_seconde_leve(self):
         with self.assertRaises(ValueError):
             carte_mouvement.fraction_par_pixel([])
+
+
+class TestImagePerturbee(unittest.TestCase):
+    """16/10 : mesure de ce qui change dans TOUTE l'image (caméra 10)."""
+
+    def _seconde(self, motif):
+        return [motif(i) for i in range(15)]
+
+    def test_image_fixe_rien_ne_change(self):
+        part, lumi = image_perturbee.stats_seconde(
+            self._seconde(lambda i: np.full((90, 160), 100, dtype=np.uint8)))
+        self.assertEqual((part, lumi), (0.0, 0.0))
+
+    def test_image_noire_une_fois_sur_deux_tout_change(self):
+        part, lumi = image_perturbee.stats_seconde(
+            self._seconde(lambda i: np.full((90, 160), 0 if i % 2 else 200, dtype=np.uint8)))
+        self.assertEqual(part, 1.0)
+        self.assertGreater(lumi, 100)
+
+    def test_une_zone_locale_ne_fait_pas_une_image_perturbee(self):
+        def motif(i):
+            img = np.full((90, 160), 100, dtype=np.uint8)
+            if i % 2:
+                img[10:30, 20:60] = 220          # 800 pixels sur 14 400
+            return img
+
+        part, _ = image_perturbee.stats_seconde(self._seconde(motif))
+        self.assertAlmostEqual(part, 800 / 14400)
+
+    def test_lecture_par_secondes_et_resume(self):
+        class Capture:
+            def __init__(self):
+                self.n = 45
+
+            def read(self):
+                if self.n == 0:
+                    return False, None
+                self.n -= 1
+                return True, np.full((360, 700, 3), 50 if self.n % 2 else 200, dtype=np.uint8)
+
+        secondes = image_perturbee.lire_secondes(Capture(), 100)
+        self.assertEqual(len(secondes), 3)
+        ligne = image_perturbee.resume(secondes)
+        self.assertIn("3 s", ligne)
+        self.assertIn(">90 % : 3", ligne)
+        self.assertEqual(image_perturbee.resume([]), "aucune seconde lue")
 
 
 class TestAmplitudeParSeuil(unittest.TestCase):

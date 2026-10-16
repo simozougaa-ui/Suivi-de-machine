@@ -3367,3 +3367,43 @@ Si une amplitude plus basse sépare marche et pause, `seuil_amplitude` de
 `CAMERAS_SUPPLEMENTAIRES` sera changé en conséquence.
 
 Tests : outils_zones 52/52.
+
+---
+
+# 16/10, soir : la protection « image perturbée » de la caméra 10 jette trop de secondes
+
+Frise de l'Encolleuse 2 du 16/10 : beaucoup de GRIS de 14 h à 20 h. Journal
+du Jetson (15:00 → 15:56) : la protection ajoutée à l'étape 6 ignore
+**162, 250, 250, 208, 251, 165, 99, 27 et 239 secondes sur 300** selon les
+fenêtres. Une minute qui garde moins de 30 secondes valides n'est pas
+envoyée, d'où le gris. Les fichiers de ces fenêtres pèsent 130 à 176 Mo,
+contre 56 Mo en temps normal : l'image change beaucoup (3 fois plus de
+données), pour une cause encore inconnue (lumière du jour, reflet de la
+lampe, exposition automatique ?).
+
+Ce sont des trous honnêtes, pas de fausses mesures. La protection avait été
+posée à partir d'un seul cas (00:00 : image noire, quasi 100 % des pixels)
+sans être mesurée sur une journée entière : erreur de ma part.
+
+Décision : ne PAS relâcher le seuil à l'aveugle. Un seuil plus haut sans
+mesure ferait entrer des secondes où toute l'image varie (luminosité) : les
+zones y verraient du « mouvement » et la machine paraîtrait en marche, ce qui
+est pire qu'un trou. Nouvel outil de mesure, qui donne la part de l'image
+qui change seconde par seconde et la variation de luminosité :
+
+    python3 outils_zones/image_perturbee.py DATE HEURE --canal 10
+
+À lancer sur une fenêtre abîmée (16/10 15:00), une fenêtre normale
+(16/10 15:40), la vraie coupure d'image (16/10 00:00) et une nuit normale
+(15/10 22:30). Si les secondes abîmées de l'après-midi sont à 50-70 % avec
+une luminosité qui oscille, c'est de l'exposition : compenser la luminosité
+(soustraire la moyenne de chaque image) plutôt que jeter les secondes. Si
+elles sont à 100 % comme à 00:00, c'est un vrai défaut d'image.
+
+Vérifié : zones du 15-16/10 aux 11 heures connues. La zone actuelle A
+(548,172,588,192) reste la meilleure : pause ≤ 5 %, marche 18 à 77 %, sauf
+22:31 où elle tombe à 11,7 %. La zone P1 (551,179,591,199) donne 20 % à
+22:31 mais 10 % pendant la pause de 01:15 (trop près du seuil de 12 %) : pas
+retenue.
+
+Tests : outils_zones 56/56 (+4).

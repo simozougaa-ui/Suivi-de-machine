@@ -3185,3 +3185,49 @@ Tests : 135/135 (+12) :
 - caméra 10 après la caméra 15 quand tout va bien.
 
 Non vérifié ici : le passage réel sur le Jetson, et la nuit.
+
+## Caméra 10, étape 5 : tests de nuit — zones à revoir
+
+Nuit du 15 au 16/10 (60 s par heure, % de secondes en mouvement). Réalité
+donnée par le patron : en marche à 22:30 et à 04:00 ; 01:15 est la pause.
+
+| Heure | Réalité | Zone 1 | Zone 2 |
+|---|---|---|---|
+| 21:00 | ? | 55 | 100 |
+| 22:30 | **marche** | **0** ❌ | 100 |
+| 00:00 | ? | 77 | 77 ⚠️ |
+| 01:15 | **pause** | 2 | **100** ❌ |
+| 02:30 | ? | 32 | 25 |
+| 04:00 | **marche** | **37** ❌ | 28 |
+| 05:30 | ? | 0 | 0 |
+| 06:30 | ? | 0 | 0 |
+
+Constats :
+- **Zone 2 :** à ~10 % de pixels en continu la nuit, même pendant la
+  pause. C'est du bruit d'image dans le noir.
+- **Zone 1 :** elle rate la machine la nuit (0 % à 22:30, 37 % à 04:00).
+  Selon le patron, la machine a **plusieurs vitesses** et avance parfois
+  **par à-coups**.
+- **00:00 :** les deux zones donnent un chiffre identique, 77 % des
+  pixels. C'est toute l'image qui change (lumière, vision de nuit ou image
+  abîmée), pas la machine.
+
+Les zones de jour ne valent donc rien la nuit. **La caméra 10 reste
+désactivée.**
+
+Décision : un outil de COMPARAISON plutôt qu'une carte de plus.
+`carte_mouvement.py --arret DATE HEURE` mesure la même région à une heure
+de marche et à une heure d'arrêt :
+- **rouge :** ce qui bouge en marche (≥ 40 % des secondes) ET reste
+  immobile à l'arrêt (< 10 %) ;
+- **jaune :** ce qui bouge aussi à l'arrêt (bruit de nuit, passages) ;
+- **vert :** les 3 meilleurs rectangles 40×20 du rouge, proposés avec
+  leurs coordonnées (sans chevauchement).
+
+Toutes les zones (`--zones` et proposées) sont mesurées aux deux heures,
+avec un verdict « OK » si marche → marche et arrêt → arrêt.
+
+Sortie : `carte_comparaison_canal10_<marche>_vs_<arrêt>.jpg`.
+
+Tests : outils_zones 47/47 (+3 : seul ce qui distingue est gardé,
+propositions sans chevauchement, dessin).

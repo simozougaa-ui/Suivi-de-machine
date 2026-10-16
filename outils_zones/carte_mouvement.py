@@ -23,8 +23,17 @@ pixels de la zone dépassent l'amplitude 25 ; la période est « marche » si
 plus de 40 % des secondes sont en mouvement. À lancer sur une heure de
 marche ET une heure d'arrêt : la bonne zone est celle qui sépare les deux.
 
+Avec --arret DATE HEURE (16/10, réglage de NUIT de l'Encolleuse 2) : carte de
+COMPARAISON entre l'heure donnée (machine EN MARCHE) et une heure où elle est
+À L'ARRÊT, la même nuit de préférence. En ROUGE seulement ce qui bouge en
+marche (>= 40 % des secondes) ET reste immobile à l'arrêt (< 10 %) ; en JAUNE
+ce qui bouge aussi à l'arrêt (bruit de nuit, passages) : inutilisable. Les
+meilleurs rectangles 40x20 du rouge sont proposés en VERT avec leurs
+coordonnées, et toutes les zones (--zones et proposées) sont mesurées aux
+deux heures.
+
 Usage :
-    python3 outils_zones/carte_mouvement.py DATE HEURE --region X1,Y1,X2,Y2 [--canal N] [--duree 60] [--zones Z1;Z2]
+    python3 outils_zones/carte_mouvement.py DATE HEURE --region X1,Y1,X2,Y2 [--canal N] [--duree 60] [--zones Z1;Z2] [--arret DATE HEURE]
 
 Exemple (Encolleuse 2, caméra 10) :
     python3 outils_zones/carte_mouvement.py 2026-10-15 20:00:00 --canal 10 --region 160,120,680,360
@@ -211,6 +220,62 @@ def lire_periode(debut, duree, region):
     return premiere, masques, "rtsp"
 
 
+VERT = (0, 200, 0)
+JAUNE = (0, 220, 255)
+TAILLE_ZONE_PROPOSEE = (40, 20)
+
+
+def masque_discriminant(f_marche, f_arret):
+    """Pixels qui bougent en marche (>= 40 % des secondes) et restent
+    immobiles à l'arrêt (< 10 %) : ceux qui distinguent vraiment les deux."""
+    return (f_marche >= FRACTION_CONTINU) & (f_arret < FRACTION_PASSAGE)
+
+
+def proposer_zones(discriminant, region, taille=TAILLE_ZONE_PROPOSEE, n=3):
+    """Les `n` rectangles `taille` (sans chevauchement) les plus remplis de
+    pixels discriminants. Renvoie [((x1, y1, x2, y2), densité 0-1), ...] en
+    coordonnées de l'image source."""
+    w, h = taille
+    H, W = discriminant.shape
+    if H < h or W < w:
+        return []
+    ii = cv2.integral(discriminant.astype(np.uint8)).astype(np.int64)
+    dens = (ii[h:, w:] - ii[:-h, w:] - ii[h:, :-w] + ii[:-h, :-w]) / float(w * h)
+    choisies = []
+    for _ in range(n):
+        y, x = np.unravel_index(int(np.argmax(dens)), dens.shape)
+        if dens[y, x] <= 0:
+            break
+        choisies.append(((region[0] + x, region[1] + y, region[0] + x + w, region[1] + y + h),
+                         float(dens[y, x])))
+        dens[max(0, y - h + 1):y + h, max(0, x - w + 1):x + w] = -1
+    return choisies
+
+
+def dessiner_comparaison(image, region, discriminant, f_marche, zoom=ZOOM, titre=""):
+    """Comme dessiner_carte, mais : rouge = discriminant, jaune = bouge aussi
+    à l'arrêt (ou trop peu en marche)."""
+    x1, y1, x2, y2 = region
+    vue = image[y1:y2, x1:x2].copy()
+    calque = vue.copy()
+    calque[(f_marche >= FRACTION_PASSAGE) & ~discriminant] = JAUNE
+    calque[discriminant] = ROUGE
+    vue = cv2.addWeighted(calque, 0.6, vue, 0.4, 0)
+    vue = cv2.resize(vue, None, fx=zoom, fy=zoom, interpolation=cv2.INTER_NEAREST)
+    # Même grille et mêmes coordonnées que dessiner_carte (sans recolorer).
+    vide = np.zeros_like(f_marche)
+    grille = dessiner_carte(np.zeros_like(image), region, vide, zoom, titre)
+    masque = grille.any(axis=2)
+    vue[masque] = grille[masque]
+    return vue
+
+
+def nom_sortie_comparaison(canal, debut, debut_arret):
+    nom = "carte_comparaison" + (f"_canal{canal}" if canal is not None else "") + \
+        f"_{debut:%Y%m%d_%H%M}_vs_{debut_arret:%Y%m%d_%H%M}.jpg"
+    return os.path.join(_commun.SORTIES_DIR, nom)
+
+
 def nom_sortie(canal, debut):
     """Un fichier par caméra ET par heure : la carte « en marche » et la
     carte « à l'arrêt » ne s'écrasent pas, pour les comparer."""
@@ -228,6 +293,8 @@ def main():
     parser.add_argument("--duree", type=int, default=60, help="secondes lues (défaut 60)")
     parser.add_argument("--zones", type=lire_zones, default=[],
                         help="zones candidates « x1,y1,x2,y2;x1,y1,x2,y2 » à mesurer et dessiner")
+    parser.add_argument("--arret", nargs=2, metavar=("DATE", "HEURE"),
+                        help="heure où la machine est À L'ARRÊT : carte de comparaison")
     args = parser.parse_args()
     for z in args.zones:
         if z[0] < args.region[0] or z[1] < args.region[1] or z[2] > args.region[2] or z[3] > args.region[3]:
@@ -248,6 +315,48 @@ def main():
         sys.exit("Aucune seconde complète lue (DVR indisponible ou pas d'enregistrement à cette heure).")
 
     canal = args.canal if args.canal is not None else os.getenv("CAMERA_CHANNEL", "?")
+    if args.arret:
+        try:
+            debut_arret = datetime.strptime(" ".join(args.arret), "%Y-%m-%d %H:%M:%S")
+        except ValueError as exc:
+            parser.error(f"--arret : format invalide ({exc}). Attendu : AAAA-MM-JJ HH:MM:SS")
+        print(f"Lecture de l'arrêt : {args.duree} s à partir de {debut_arret:%Y-%m-%d %H:%M:%S}...")
+        try:
+            _, masques_arret, _ = lire_periode(debut_arret, args.duree, args.region)
+        except ValueError as e:
+            sys.exit(f"Erreur : {e}.")
+        if not masques_arret:
+            sys.exit("Aucune seconde complète lue à l'heure d'arrêt.")
+        f_marche = fraction_par_pixel(masques)
+        discriminant = masque_discriminant(f_marche, fraction_par_pixel(masques_arret))
+        carte = dessiner_comparaison(
+            premiere, args.region, discriminant, f_marche,
+            titre=f"Camera {canal} - marche {debut:%d/%m %H:%M} vs arret {debut_arret:%d/%m %H:%M}")
+        proposees = proposer_zones(discriminant, args.region)
+        dessiner_zones(carte, args.region, args.zones)
+        rx1, ry1 = args.region[0], args.region[1]
+        for i, (z, _) in enumerate(proposees, 1):
+            cv2.rectangle(carte, ((z[0] - rx1) * ZOOM, (z[1] - ry1) * ZOOM),
+                          ((z[2] - rx1) * ZOOM, (z[3] - ry1) * ZOOM), VERT, 2)
+            cv2.putText(carte, f"P{i}", ((z[0] - rx1) * ZOOM + 3, (z[1] - ry1) * ZOOM - 4),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, VERT, 2, cv2.LINE_AA)
+        if not proposees:
+            print("Aucun pixel ne bouge en marche en restant immobile à l'arrêt.")
+        a_mesurer = [(f"zone {i}", z) for i, z in enumerate(args.zones, 1)] + \
+            [(f"P{i} (proposée, {100 * d:.0f} % de rouge)", z) for i, (z, d) in enumerate(proposees, 1)]
+        print(f"Zones mesurées (marche {debut:%d/%m %H:%M} / arrêt {debut_arret:%d/%m %H:%M}) :")
+        for nom, z in a_mesurer:
+            pm, _, vm = mesurer_zone(masques, args.region, z)
+            pa, _, va = mesurer_zone(masques_arret, args.region, z)
+            bon = "OK" if (vm, va) == ("marche", "arret") else "NON"
+            print(f"  {nom} {z[0]},{z[1]},{z[2]},{z[3]} : marche {pm:5.1f} % -> {vm} ; "
+                  f"arrêt {pa:5.1f} % -> {va}  [{bon}]")
+        sortie = nom_sortie_comparaison(args.canal, debut, debut_arret)
+        os.makedirs(_commun.SORTIES_DIR, exist_ok=True)
+        cv2.imwrite(sortie, carte)
+        print(f"OK : {sortie}")
+        return
+
     carte = dessiner_carte(premiere, args.region, fraction_par_pixel(masques),
                            titre=f"Camera {canal} - {debut:%Y-%m-%d %H:%M:%S} - {len(masques)} s")
     if args.zones:

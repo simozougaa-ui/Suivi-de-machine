@@ -211,6 +211,29 @@ class TestCarteMouvement(unittest.TestCase):
         self.assertEqual(carte_mouvement.lire_zones("565,170,620,190;430,210,500,235"),
                          [(565, 170, 620, 190), (430, 210, 500, 235)])
 
+    def test_comparaison_garde_seulement_ce_qui_distingue_marche_et_arret(self):
+        fm = np.zeros((20, 40)); fa = np.zeros((20, 40))
+        fm[5:10, 10:20] = 0.8              # tapis : bouge en marche seulement
+        fm[0:3, 0:5] = 0.9; fa[0:3, 0:5] = 0.9   # bruit de nuit : bouge tout le temps
+        d = carte_mouvement.masque_discriminant(fm, fa)
+        self.assertTrue(d[5:10, 10:20].all())
+        self.assertFalse(d[0:3, 0:5].any())
+
+    def test_proposer_zones_sur_le_rouge(self):
+        region = (100, 50, 300, 150)
+        d = np.zeros((100, 200), dtype=bool)
+        d[30:50, 60:100] = True             # bloc 40x20 en (160..200, 80..100) dans la source
+        zones = carte_mouvement.proposer_zones(d, region, n=3)
+        self.assertEqual(zones[0], ((160, 80, 200, 100), 1.0))
+        self.assertTrue(all(z[1] < 1.0 for z in zones[1:]))     # pas deux fois le même bloc
+        self.assertEqual(carte_mouvement.proposer_zones(np.zeros((100, 200), bool), region), [])
+
+    def test_dessin_de_la_comparaison(self):
+        image = np.zeros((120, 200, 3), dtype=np.uint8)
+        d = np.zeros((20, 40), dtype=bool); d[5:10, 10:20] = True
+        carte = carte_mouvement.dessiner_comparaison(image, self.region, d, d.astype(float))
+        self.assertEqual(carte.shape, (40, 80, 3))
+
     def test_une_carte_par_heure(self):
         nom = carte_mouvement.nom_sortie(10, datetime(2026, 10, 15, 20, 0))
         self.assertTrue(nom.endswith("carte_mouvement_canal10_20261015_2000.jpg"))

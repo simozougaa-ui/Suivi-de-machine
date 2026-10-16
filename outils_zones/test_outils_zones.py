@@ -307,6 +307,20 @@ class TestImagePerturbee(unittest.TestCase):
         part, _ = image_perturbee.stats_seconde(self._seconde(motif))
         self.assertAlmostEqual(part, 800 / 14400)
 
+    def test_trace_luminosite_image_par_image(self):
+        class Capture:
+            def __init__(self):
+                self.i = 0
+
+            def read(self):
+                if self.i >= 6:
+                    return False, None
+                self.i += 1
+                return True, np.full((360, 700, 3), 0 if self.i % 2 else 120, dtype=np.uint8)
+
+        valeurs = image_perturbee.luminosites(Capture(), 10)
+        self.assertEqual([round(v) for v in valeurs], [0, 120, 0, 120, 0, 120])   # alternance visible
+
     def test_lecture_par_secondes_et_resume(self):
         class Capture:
             def __init__(self):

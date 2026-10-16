@@ -3407,3 +3407,28 @@ Vérifié : zones du 15-16/10 aux 11 heures connues. La zone actuelle A
 retenue.
 
 Tests : outils_zones 56/56 (+4).
+
+### Mesure du 16/10 21:07 : l'image de la caméra 10 est abîmée DANS l'enregistrement
+
+`image_perturbee.py`, fenêtres de 5 minutes du 16/10 :
+- 15:05 : 177 Mo, médiane 99 % des pixels qui changent, 242 secondes sur
+  300 à plus de 90 %, variation de luminosité 115 ;
+- 15:20 : 154 Mo, 99 %, 251 secondes sur 300, luminosité 118 ;
+- 15:35 : 56 Mo, 1 %, 0 seconde, luminosité 0,4 (normale) ;
+- rappel 00:00 : 99 %, 47 secondes sur 61, luminosité 129.
+
+Les fenêtres abîmées de l'après-midi ont la MÊME signature que minuit. La
+protection est donc juste : ces secondes sont un vrai défaut de l'image
+enregistrée, et les minutes qui en perdent trop restent « non mesurées ».
+Les zones restent bonnes quand l'image est propre : 16/10 15:00 marche
+(100 % des secondes, vert sur la frise) et 15:40 arrêt (0 %, rouge sur la
+frise).
+
+Cause probable : défaut matériel de la caméra 10 (câble, alimentation,
+signal), à vérifier sur place : ce n'est pas le programme.
+
+Piste logicielle : si seules certaines images sont abîmées (alternance
+bonne / mauvaise), les écarter et mesurer avec les bonnes. L'outil a une
+option `--trace N` qui affiche la luminosité image par image pour le voir.
+
+Tests : outils_zones 57/57.

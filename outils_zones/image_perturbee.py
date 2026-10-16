@@ -66,6 +66,20 @@ def lire_secondes(capture, max_images, pas=FPS):
     return resultats
 
 
+def luminosites(capture, n):
+    """Luminosité moyenne (0-255) des `n` premières images de la capture,
+    image par image : montre si l'image abîmée alterne bonne / mauvaise
+    (on pourrait alors écarter les mauvaises) ou reste abîmée en continu."""
+    valeurs = []
+    for _ in range(n):
+        ret, frame = capture.read()
+        if not ret or frame is None:
+            break
+        petite = cv2.resize(frame, TAILLE_IMAGE_CONTROLE, interpolation=cv2.INTER_AREA)
+        valeurs.append(float(cv2.cvtColor(petite, cv2.COLOR_BGR2GRAY).mean()))
+    return valeurs
+
+
 def resume(secondes):
     """Ligne de synthèse lisible sur un téléphone."""
     if not secondes:
@@ -86,17 +100,24 @@ def main():
     parser.add_argument("heure")
     parser.add_argument("--canal", type=int, help="caméra du DVR (défaut : CAMERA_CHANNEL du .env)")
     parser.add_argument("--duree", type=int, default=60, help="secondes lues (défaut 60)")
+    parser.add_argument("--trace", type=int, metavar="N", default=0,
+                        help="affiche la luminosité moyenne des N premières images, une par une")
     args = parser.parse_args()
     try:
         debut = datetime.strptime(f"{args.date} {args.heure}", "%Y-%m-%d %H:%M:%S")
     except ValueError as exc:
         parser.error(f"format de date/heure invalide ({exc}). Attendu : AAAA-MM-JJ HH:MM:SS")
 
-    fin = debut + timedelta(seconds=args.duree)
+    fin = debut + timedelta(seconds=min(args.duree, 10) if args.trace else args.duree)
     try:
         with lecture_dvr.fenetre_telechargee(debut, fin, canal=args.canal) as (chemin, octets):
             capture, chemin_lu = lecture_dvr.ouvrir_fichier(chemin)
             try:
+                if args.trace:
+                    valeurs = luminosites(capture, args.trace)
+                    print(f"{debut:%d/%m %H:%M:%S} luminosité image par image (0-255) : "
+                          + " ".join(f"{v:.0f}" for v in valeurs))
+                    return
                 secondes = lire_secondes(capture, args.duree * FPS + FPS)
             finally:
                 capture.release()

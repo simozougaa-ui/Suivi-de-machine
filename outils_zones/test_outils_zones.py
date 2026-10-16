@@ -169,6 +169,33 @@ class TestCarteMouvement(unittest.TestCase):
         with self.assertRaises(ValueError):
             carte_mouvement.lire_masques(Capture(5), (0, 0, 300, 50), 100)
 
+    def test_cadence_reelle_du_fichier(self):
+        class Capture:
+            def __init__(self, fps):
+                self.fps = fps
+
+            def get(self, _):
+                return self.fps
+
+        self.assertEqual(carte_mouvement.images_par_seconde(Capture(2.5)), 2)
+        self.assertEqual(carte_mouvement.images_par_seconde(Capture(25.0)), 25)
+        self.assertEqual(carte_mouvement.images_par_seconde(Capture(0.0)), 15)     # absente
+        self.assertEqual(carte_mouvement.images_par_seconde(Capture(90000.0)), 15)  # absurde
+
+    def test_paquets_a_la_cadence_reelle(self):
+        class Capture:
+            def __init__(self, n):
+                self.n = n
+
+            def read(self):
+                if self.n == 0:
+                    return False, None
+                self.n -= 1
+                return True, np.full((120, 200, 3), 100, dtype=np.uint8)
+
+        _, masques = carte_mouvement.lire_masques(Capture(150), self.region, 1000, pas=3)
+        self.assertEqual(len(masques), 50)          # 150 images à 3 img/s = 50 s
+
     def test_une_carte_par_heure(self):
         nom = carte_mouvement.nom_sortie(10, datetime(2026, 10, 15, 20, 0))
         self.assertTrue(nom.endswith("carte_mouvement_canal10_20261015_2000.jpg"))

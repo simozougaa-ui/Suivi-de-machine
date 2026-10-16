@@ -102,10 +102,23 @@ def dessiner_carte(image, region, fraction, zoom=ZOOM, titre=""):
     return vue
 
 
-def lire_masques(capture, region, max_images):
-    """Lit jusqu'à `max_images` images de `capture`. Renvoie (première image,
-    [masque par seconde complète]). Une dernière seconde incomplète est
-    ignorée. Lève ValueError si la région sort de l'image."""
+def images_par_seconde(capture, defaut=FPS):
+    """Cadence annoncée par le fichier/flux, arrondie (16/10 : la caméra 10
+    n'enregistre peut-être pas à 15 img/s comme la caméra 15 ; avec 15 fixe,
+    60 s de vidéo à 2,5 img/s passaient pour 10 s). `defaut` si la valeur
+    est absente ou absurde."""
+    try:
+        fps = float(capture.get(cv2.CAP_PROP_FPS))
+    except Exception:  # noqa: BLE001
+        return defaut
+    return int(round(fps)) if 1 <= fps <= 60 else defaut
+
+
+def lire_masques(capture, region, max_images, pas=FPS):
+    """Lit jusqu'à `max_images` images de `capture`, par paquets de `pas`
+    images (une seconde de vidéo). Renvoie (première image, [masque par
+    seconde complète]). Une dernière seconde incomplète est ignorée. Lève
+    ValueError si la région sort de l'image."""
     premiere, tampon, masques = None, [], []
     for _ in range(max_images):
         ret, frame = capture.read()
@@ -117,7 +130,7 @@ def lire_masques(capture, region, max_images):
             if region[2] > w or region[3] > h:
                 raise ValueError(f"région hors de l'image ({w}x{h})")
         tampon.append(cv2.GaussianBlur(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), FLOU, 0))
-        if len(tampon) == FPS:
+        if len(tampon) == pas:
             masques.append(masque_seconde(tampon, region))
             tampon = []
     return premiere, masques
@@ -127,12 +140,16 @@ def lire_periode(debut, duree, region):
     """Téléchargement HTTP de la période puis lecture locale ; repli RTSP si
     le téléchargement échoue. Renvoie (première image, masques, méthode)."""
     fin = debut + timedelta(seconds=duree)
-    max_images = duree * FPS + FPS
     try:
-        with lecture_dvr.fenetre_telechargee(debut, fin) as (chemin, _):
+        with lecture_dvr.fenetre_telechargee(debut, fin) as (chemin, octets):
             capture, chemin_lu = lecture_dvr.ouvrir_fichier(chemin)
             try:
-                premiere, masques = lire_masques(capture, region, max_images)
+                pas = images_par_seconde(capture)
+                total = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+                print(f"Fichier : {octets / (1024 * 1024):.1f} Mo, {pas} images/s annoncées, "
+                      f"{total or '?'} images" +
+                      (f" (≈ {total / pas:.0f} s de vidéo)" if total else "") + ".")
+                premiere, masques = lire_masques(capture, region, duree * pas + pas, pas)
             finally:
                 capture.release()
                 if chemin_lu != chemin:
@@ -143,7 +160,9 @@ def lire_periode(debut, duree, region):
         print(f"Téléchargement HTTP impossible ({lecture_dvr.masquer(e)}) : relecture RTSP, plus lente.")
     capture = open_stream(build_rtsp_playback_url(debut, fin))
     try:
-        premiere, masques = lire_masques(capture, region, max_images)
+        pas = images_par_seconde(capture)
+        print(f"Flux RTSP : {pas} images/s annoncées.")
+        premiere, masques = lire_masques(capture, region, duree * pas + pas, pas)
     finally:
         capture.release()
     return premiere, masques, "rtsp"

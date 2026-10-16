@@ -3061,3 +3061,27 @@ Corrections de l'outil :
   qu'elles s'écrasent.
 
 Tests : outils_zones 41/41.
+
+### Carte de mouvement : cadence réelle de la caméra
+
+Deuxième essai (HTTP, 60 s demandées) : encore « 10 s analysées », et une
+carte identique au premier essai. Deux explications possibles, non
+tranchées ici :
+- **(a)** la caméra 10 n'enregistre que sur détection de mouvement, par
+  morceaux ;
+- **(b)** elle enregistre moins de 15 images/s. L'outil regroupait les
+  images par 15 (la cadence de la caméra 15) : 150 images à 2,5 img/s
+  font 60 s, mais elles étaient comptées comme 10 s.
+
+Correction : l'outil lit la cadence annoncée par le fichier (ou le flux)
+et regroupe les images à cette cadence. Si elle est absente ou absurde, il
+garde 15. Il affiche aussi la taille du fichier, la cadence, le nombre
+d'images et la durée de vidéo, ce qui permet de trancher entre (a) et (b).
+Le patron vérifie en parallèle dans DMSS si l'enregistrement de la caméra
+10 est continu.
+
+À retenir pour la suite : si la caméra 10 n'est pas à 15 img/s, la
+détection (`analyser_capture`, `FPS_SUPPOSE` = 15) devra prendre la
+cadence de chaque caméra.
+
+Tests : outils_zones 43/43.

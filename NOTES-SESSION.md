@@ -3339,3 +3339,31 @@ Le réglage `--ecart` fait maintenant partie du nom du fichier
 confond plus une carte neuve avec une ancienne mise en cache (les
 rechargements montraient la même image alors que le seuil avait changé).
 Tests : outils_zones 49/49.
+
+### Comparaison 22:31 / 01:10 (--ecart 8) : la machine lente est quasi invisible à l'amplitude 25
+
+Résultat de la commande (région 160,120,680,360) :
+- écart maximal 53 points, mais seulement **0,1 % de la région** à 8 points
+  d'écart ou plus : la carte n'a presque pas de rouge ;
+- P1 551,179,591,199 : marche **20,0 %**, arrêt 1,7 % : elle distingue, mais
+  l'outil la jugeait « NON » avec la règle des 40 % ;
+- P2 261,275,301,295 : 100 % aux deux heures : bruit du bas à gauche ;
+- P3 : 0 %.
+
+Lecture : à 22:31, l'Encolleuse 2 est très lente et son contraste de nuit est
+faible. Peu de pixels changent de plus de 25 niveaux de gris en une seconde
+(seuil d'amplitude de Bob B / Bob C). Ce n'est pas un problème de placement
+des zones.
+
+Ajouts à `carte_mouvement.py` :
+- `--amplitude N` (défaut 25) : seuil d'amplitude d'un pixel. Le baisser (18
+  ou 12) révèle un mouvement faible, au prix de plus de bruit. La
+  comparaison avec la pause de 01:10 montre si ce bruit est gérable ;
+- `--marche-pct N` (défaut 40) : seuil du verdict « marche » (12 pour
+  l'Encolleuse 2) ;
+- l'amplitude fait partie du nom du fichier (`_ampN`).
+
+Si une amplitude plus basse sépare marche et pause, `seuil_amplitude` de
+`CAMERAS_SUPPLEMENTAIRES` sera changé en conséquence.
+
+Tests : outils_zones 52/52.

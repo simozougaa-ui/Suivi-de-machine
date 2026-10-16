@@ -249,6 +249,27 @@ class TestCarteMouvement(unittest.TestCase):
         self.assertTrue(defaut.endswith("carte_comparaison_canal10_20261015_2231_vs_20261016_0110.jpg"))
         self.assertTrue(carte_mouvement.nom_sortie_comparaison(10, m, a, 8).endswith("_vs_20261016_0110_ecart8.jpg"))
 
+    def test_amplitude_plus_basse_voit_un_mouvement_faible(self):
+        images = []
+        for i in range(15):
+            img = np.full((120, 200), 100, dtype=np.uint8)
+            if i % 2:
+                img[55:60, 110:120] = 118          # +18 niveaux : sous 25, au-dessus de 12
+            images.append(img)
+        self.assertFalse(carte_mouvement.masque_seconde(images, self.region).any())
+        self.assertTrue(carte_mouvement.masque_seconde(images, self.region, 12).any())
+
+    def test_verdict_avec_seuil_de_marche_propre(self):
+        masques = [carte_mouvement.masque_seconde(self._seconde(i < 2), self.region) for i in range(10)]
+        # 2 s sur 10 en mouvement = 20 % : « arrêt » à 40 %, « marche » à 12 %.
+        zone = (108, 54, 122, 61)
+        self.assertEqual(carte_mouvement.mesurer_zone(masques, self.region, zone)[2], "arret")
+        self.assertEqual(carte_mouvement.mesurer_zone(masques, self.region, zone, 12)[2], "marche")
+
+    def test_amplitude_dans_le_nom_du_fichier(self):
+        m, a = datetime(2026, 10, 15, 22, 31), datetime(2026, 10, 16, 1, 10)
+        self.assertTrue(carte_mouvement.nom_sortie_comparaison(10, m, a, 8, 12).endswith("_ecart8_amp12.jpg"))
+
     def test_une_carte_par_heure(self):
         nom = carte_mouvement.nom_sortie(10, datetime(2026, 10, 15, 20, 0))
         self.assertTrue(nom.endswith("carte_mouvement_canal10_20261015_2000.jpg"))

@@ -89,7 +89,7 @@ def lire_zones(texte):
     return zones
 
 
-def mesurer_zone(masques, region, zone):
+def mesurer_zone(masques, region, zone, marche_pct=100 * FRACTION_CONTINU):
     """Règle de la détection (machine 2) appliquée à `zone` (coordonnées de
     l'image source, incluse dans `region`). Renvoie (% de secondes en
     mouvement, % moyen de pixels en mouvement, verdict)."""
@@ -100,7 +100,7 @@ def mesurer_zone(masques, region, zone):
     fractions = [100.0 * float(m[y1 - ry1:y2 - ry1, x1 - rx1:x2 - rx1].mean()) for m in masques]
     en_mouvement = sum(1 for f in fractions if f > SEUIL_SECONDE_POURCENT)
     pct = 100.0 * en_mouvement / len(fractions)
-    return pct, sum(fractions) / len(fractions), ("marche" if pct > 100 * FRACTION_CONTINU else "arret")
+    return pct, sum(fractions) / len(fractions), ("marche" if pct > marche_pct else "arret")
 
 
 def dessiner_zones(carte, region, zones, zoom=ZOOM):
@@ -169,7 +169,7 @@ def images_par_seconde(capture, defaut=FPS):
     return int(round(fps)) if 1 <= fps <= 60 else defaut
 
 
-def lire_masques(capture, region, max_images, pas=FPS):
+def lire_masques(capture, region, max_images, pas=FPS, seuil=SEUIL_PIXEL):
     """Lit jusqu'à `max_images` images de `capture`, par paquets de `pas`
     images (une seconde de vidéo). Renvoie (première image, [masque par
     seconde complète]). Une dernière seconde incomplète est ignorée. Lève
@@ -186,12 +186,12 @@ def lire_masques(capture, region, max_images, pas=FPS):
                 raise ValueError(f"région hors de l'image ({w}x{h})")
         tampon.append(cv2.GaussianBlur(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), FLOU, 0))
         if len(tampon) == pas:
-            masques.append(masque_seconde(tampon, region))
+            masques.append(masque_seconde(tampon, region, seuil))
             tampon = []
     return premiere, masques
 
 
-def lire_periode(debut, duree, region):
+def lire_periode(debut, duree, region, seuil=SEUIL_PIXEL):
     """Téléchargement HTTP de la période puis lecture locale ; repli RTSP si
     le téléchargement échoue. Renvoie (première image, masques, méthode)."""
     fin = debut + timedelta(seconds=duree)
@@ -204,7 +204,7 @@ def lire_periode(debut, duree, region):
                 print(f"Fichier : {octets / (1024 * 1024):.1f} Mo, {pas} images/s annoncées, "
                       f"{total or '?'} images" +
                       (f" (≈ {total / pas:.0f} s de vidéo)" if total else "") + ".")
-                premiere, masques = lire_masques(capture, region, duree * pas + pas, pas)
+                premiere, masques = lire_masques(capture, region, duree * pas + pas, pas, seuil)
             finally:
                 capture.release()
                 if chemin_lu != chemin:
@@ -217,7 +217,7 @@ def lire_periode(debut, duree, region):
     try:
         pas = images_par_seconde(capture)
         print(f"Flux RTSP : {pas} images/s annoncées.")
-        premiere, masques = lire_masques(capture, region, duree * pas + pas, pas)
+        premiere, masques = lire_masques(capture, region, duree * pas + pas, pas, seuil)
     finally:
         capture.release()
     return premiere, masques, "rtsp"
@@ -285,11 +285,13 @@ def dessiner_comparaison(image, region, discriminant, f_marche, zoom=ZOOM, titre
     return vue
 
 
-def nom_sortie_comparaison(canal, debut, debut_arret, ecart=ECART_ROUGE * 100):
+def nom_sortie_comparaison(canal, debut, debut_arret, ecart=ECART_ROUGE * 100,
+                           amplitude=SEUIL_PIXEL):
     """Le réglage --ecart (s'il n'est pas celui par défaut) fait partie du nom :
     deux réglages ne s'écrasent pas, et le navigateur ne peut pas confondre
     une nouvelle carte avec une ancienne gardée en mémoire."""
     suffixe = "" if abs(ecart - ECART_ROUGE * 100) < 1e-9 else f"_ecart{ecart:g}"
+    suffixe += "" if amplitude == SEUIL_PIXEL else f"_amp{amplitude}"
     nom = "carte_comparaison" + (f"_canal{canal}" if canal is not None else "") + \
         f"_{debut:%Y%m%d_%H%M}_vs_{debut_arret:%Y%m%d_%H%M}{suffixe}.jpg"
     return os.path.join(_commun.SORTIES_DIR, nom)
@@ -314,6 +316,12 @@ def main():
                         help="zones candidates « x1,y1,x2,y2;x1,y1,x2,y2 » à mesurer et dessiner")
     parser.add_argument("--arret", nargs=2, metavar=("DATE", "HEURE"),
                         help="heure où la machine est À L'ARRÊT : carte de comparaison")
+    parser.add_argument("--amplitude", type=int, default=SEUIL_PIXEL,
+                        help=f"seuil d'amplitude d'un pixel (défaut {SEUIL_PIXEL}) ; baisser (18, 12) "
+                             "pour voir une machine lente de nuit, au prix de plus de bruit")
+    parser.add_argument("--marche-pct", type=float, default=100 * FRACTION_CONTINU,
+                        help="seuil du verdict « marche » en %% des secondes (défaut 40 ; "
+                             "12 pour l'Encolleuse 2)")
     parser.add_argument("--ecart", type=float, default=ECART_ROUGE * 100,
                         help="écart minimal (points de %% des secondes, marche moins arrêt) pour "
                              "colorer un pixel en ROUGE (défaut 15 ; baisser pour une machine lente)")
@@ -330,7 +338,7 @@ def main():
 
     print(f"Lecture de {args.duree} s à partir de {debut:%Y-%m-%d %H:%M:%S}...")
     try:
-        premiere, masques, methode = lire_periode(debut, args.duree, args.region)
+        premiere, masques, methode = lire_periode(debut, args.duree, args.region, args.amplitude)
     except ValueError as e:
         sys.exit(f"Erreur : {e}.")
     if premiere is None or not masques:
@@ -344,7 +352,7 @@ def main():
             parser.error(f"--arret : format invalide ({exc}). Attendu : AAAA-MM-JJ HH:MM:SS")
         print(f"Lecture de l'arrêt : {args.duree} s à partir de {debut_arret:%Y-%m-%d %H:%M:%S}...")
         try:
-            _, masques_arret, _ = lire_periode(debut_arret, args.duree, args.region)
+            _, masques_arret, _ = lire_periode(debut_arret, args.duree, args.region, args.amplitude)
         except ValueError as e:
             sys.exit(f"Erreur : {e}.")
         if not masques_arret:
@@ -373,12 +381,12 @@ def main():
             [(f"P{i} (proposée, écart {100 * d:.0f})", z) for i, (z, d) in enumerate(proposees, 1)]
         print(f"Zones mesurées (marche {debut:%d/%m %H:%M} / arrêt {debut_arret:%d/%m %H:%M}) :")
         for nom, z in a_mesurer:
-            pm, _, vm = mesurer_zone(masques, args.region, z)
-            pa, _, va = mesurer_zone(masques_arret, args.region, z)
+            pm, _, vm = mesurer_zone(masques, args.region, z, args.marche_pct)
+            pa, _, va = mesurer_zone(masques_arret, args.region, z, args.marche_pct)
             bon = "OK" if (vm, va) == ("marche", "arret") else "NON"
             print(f"  {nom} {z[0]},{z[1]},{z[2]},{z[3]} : marche {pm:5.1f} % -> {vm} ; "
                   f"arrêt {pa:5.1f} % -> {va}  [{bon}]")
-        sortie = nom_sortie_comparaison(args.canal, debut, debut_arret, args.ecart)
+        sortie = nom_sortie_comparaison(args.canal, debut, debut_arret, args.ecart, args.amplitude)
         os.makedirs(_commun.SORTIES_DIR, exist_ok=True)
         cv2.imwrite(sortie, carte)
         print(f"OK : {sortie}")
@@ -391,7 +399,7 @@ def main():
         print(f"Zones (seconde en mouvement si > {SEUIL_SECONDE_POURCENT:g} % de la zone bouge ; "
               f"marche si > {100 * FRACTION_CONTINU:g} % des secondes) :")
         for i, z in enumerate(args.zones, 1):
-            pct, moyen, verdict = mesurer_zone(masques, args.region, z)
+            pct, moyen, verdict = mesurer_zone(masques, args.region, z, args.marche_pct)
             print(f"  zone {i} {z[0]},{z[1]},{z[2]},{z[3]} : {pct:5.1f} % des secondes en mouvement, "
                   f"{moyen:5.1f} % de pixels en moyenne -> {verdict}")
     sortie = nom_sortie(args.canal, debut)

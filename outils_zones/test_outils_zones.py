@@ -219,6 +219,12 @@ class TestCarteMouvement(unittest.TestCase):
         self.assertTrue(d[5:10, 10:20].all())
         self.assertFalse(d[0:3, 0:5].any())
 
+    def test_seuil_d_ecart_reglable_pour_une_machine_lente(self):
+        fm = np.zeros((20, 40)); fa = np.zeros((20, 40))
+        fm[5:10, 10:20] = 0.10             # machine très lente : 10 points d'écart seulement
+        self.assertFalse(carte_mouvement.masque_discriminant(fm, fa).any())        # 15 : rien de rouge
+        self.assertTrue(carte_mouvement.masque_discriminant(fm, fa, 0.08)[5:10, 10:20].all())
+
     def test_proposer_zones_sur_le_rouge(self):
         region = (100, 50, 300, 150)
         d = np.zeros((100, 200), dtype=bool)

@@ -26,8 +26,10 @@ marche ET une heure d'arrêt : la bonne zone est celle qui sépare les deux.
 Avec --arret DATE HEURE (16/10, réglage de NUIT de l'Encolleuse 2) : carte de
 COMPARAISON entre l'heure donnée (machine EN MARCHE) et une heure où elle est
 À L'ARRÊT, la même nuit de préférence. En ROUGE ce qui bouge nettement plus
-souvent en marche qu'à l'arrêt (écart >= 15 points de % des secondes : une
-machine lente ou par à-coups ne bouge jamais 40 % du temps) ; en JAUNE ce qui
+souvent en marche qu'à l'arrêt (écart >= --ecart points de % des secondes,
+15 par défaut : une machine lente ou par à-coups ne bouge jamais 40 % du
+temps ; si aucun pixel n'est rouge, baisser --ecart, l'écart maximal trouvé
+est affiché) ; en JAUNE ce qui
 bouge sans faire la différence (bruit de nuit, passages). Les 3 rectangles
 40x20 au plus grand écart moyen sont proposés en VERT avec leurs
 coordonnées, et toutes les zones (--zones et proposées) sont mesurées aux
@@ -308,6 +310,9 @@ def main():
                         help="zones candidates « x1,y1,x2,y2;x1,y1,x2,y2 » à mesurer et dessiner")
     parser.add_argument("--arret", nargs=2, metavar=("DATE", "HEURE"),
                         help="heure où la machine est À L'ARRÊT : carte de comparaison")
+    parser.add_argument("--ecart", type=float, default=ECART_ROUGE * 100,
+                        help="écart minimal (points de %% des secondes, marche moins arrêt) pour "
+                             "colorer un pixel en ROUGE (défaut 15 ; baisser pour une machine lente)")
     args = parser.parse_args()
     for z in args.zones:
         if z[0] < args.region[0] or z[1] < args.region[1] or z[2] > args.region[2] or z[3] > args.region[3]:
@@ -342,7 +347,11 @@ def main():
             sys.exit("Aucune seconde complète lue à l'heure d'arrêt.")
         f_marche = fraction_par_pixel(masques)
         f_arret = fraction_par_pixel(masques_arret)
-        discriminant = masque_discriminant(f_marche, f_arret)
+        ecart = ecart_marche_arret(f_marche, f_arret)
+        discriminant = masque_discriminant(f_marche, f_arret, args.ecart / 100.0)
+        print(f"Écart maximal marche - arrêt : {100 * float(ecart.max()):.0f} points "
+              f"(rouge = écart >= {args.ecart:g} points ; "
+              f"{100 * float(discriminant.mean()):.1f} % de la région en rouge).")
         carte = dessiner_comparaison(
             premiere, args.region, discriminant, f_marche,
             titre=f"Camera {canal} - marche {debut:%d/%m %H:%M} vs arret {debut_arret:%d/%m %H:%M}")

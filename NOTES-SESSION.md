@@ -3307,3 +3307,29 @@ Tests : 137/137 (+2 : seuil de 12 % pour une marche lente de nuit, avec
 la pause qui reste un arrêt ; image qui clignote ignorée). outils_zones
 47/47.
 Non vérifié ici : le passage réel sur le Jetson avec les deux caméras.
+
+### Comparaison : ce que veulent dire rouge et jaune, et `--ecart`
+
+Carte « marche 15/10 22:31 contre arrêt 16/10 01:10 », région agrandie. Les
+trois zones proposées sont en JAUNE, et le patron s'attendait à du rouge.
+
+Sur la carte de comparaison :
+- **rouge :** bouge au moins 15 points de % des secondes de plus en marche
+  qu'à l'arrêt ;
+- **jaune :** bouge en marche (≥ 10 % des secondes) mais avec un écart de
+  moins de 15 points.
+
+À 22:31 la machine tourne très lentement : aucun pixel n'atteint 15 points
+d'écart. Les zones proposées sont le meilleur endroit disponible, pas un
+mauvais placement.
+
+Correction : option **`--ecart N`** (défaut 15) pour baisser ce seuil de
+coloration, et l'outil affiche l'écart maximal trouvé et la part de la
+région en rouge. Baisser N (par exemple 8) pour voir où une machine lente
+bouge le plus.
+
+Info du patron : la lampe est entre la caméra et la zone 1 (éblouissement).
+Elle est petite, vers (480, 315). Pas de changement de zone tant que les
+mesures ne le disent pas.
+
+Tests : outils_zones 48/48.

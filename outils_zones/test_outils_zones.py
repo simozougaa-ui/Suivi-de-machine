@@ -152,6 +152,27 @@ class TestCarteMouvement(unittest.TestCase):
             with self.assertRaises(argparse.ArgumentTypeError):
                 carte_mouvement.lire_region(mauvais)
 
+    def test_lecture_par_secondes_completes_et_region_hors_image(self):
+        class Capture:
+            def __init__(self, n):
+                self.n = n
+
+            def read(self):
+                if self.n == 0:
+                    return False, None
+                self.n -= 1
+                return True, np.full((120, 200, 3), 100, dtype=np.uint8)
+
+        premiere, masques = carte_mouvement.lire_masques(Capture(40), self.region, 100)
+        self.assertEqual(premiere.shape, (120, 200, 3))
+        self.assertEqual(len(masques), 2)            # 40 images = 2 s complètes
+        with self.assertRaises(ValueError):
+            carte_mouvement.lire_masques(Capture(5), (0, 0, 300, 50), 100)
+
+    def test_une_carte_par_heure(self):
+        nom = carte_mouvement.nom_sortie(10, datetime(2026, 10, 15, 20, 0))
+        self.assertTrue(nom.endswith("carte_mouvement_canal10_20261015_2000.jpg"))
+
     def test_aucune_seconde_leve(self):
         with self.assertRaises(ValueError):
             carte_mouvement.fraction_par_pixel([])

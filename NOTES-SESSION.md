@@ -3042,3 +3042,22 @@ Tests : outils_zones 38/38 (+4 : seuls les pixels qui bougent sont
 marqués, part des secondes et couleur, région invalide refusée, aucune
 seconde lue).
 Non vérifié ici : le rendu sur une vraie image de la caméra 10.
+
+### Carte de mouvement : lecture HTTP, 60 s, une carte par heure
+
+Premier essai (caméra 10, 15/10 à 20:00) : en RTSP, seules **10 s sur 20**
+ont été lues (relecture du DVR plus lente que le temps réel). C'est trop
+court pour séparer la machine des passages : une grande tache orange,
+probablement quelqu'un qui passe ou la lumière. Une ligne de points rouges
+apparaît pourtant en diagonale, d'environ (520, 185) à (605, 160) : sans
+doute les boîtes sur le tapis de sortie (à confirmer).
+
+Corrections de l'outil :
+- lecture par **téléchargement HTTP**, comme la détection, avec repli RTSP
+  si le téléchargement échoue : rapide et complet ;
+- **60 s** par défaut ;
+- un fichier par heure (`carte_mouvement_canal10_AAAAMMJJ_HHMM.jpg`), pour
+  comparer une carte « en marche » et une carte « à l'arrêt » sans
+  qu'elles s'écrasent.
+
+Tests : outils_zones 41/41.

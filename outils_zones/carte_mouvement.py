@@ -3,7 +3,10 @@ détection d'une NOUVELLE machine sans deviner les pixels (16/10 : Encolleuse 2
 sur la caméra 10). Outil de mesure LOCAL : n'envoie rien à l'application de
 suivi, ne touche à aucun fichier de production.
 
-Lit --duree secondes à pleine cadence. Méthode IDENTIQUE à zones.py (gris,
+Lit --duree secondes (60 par défaut) par TÉLÉCHARGEMENT HTTP, comme la
+détection (rapide et complet ; 16/10 : en RTSP, seules 10 s sur 20 avaient
+été lues), avec repli sur la relecture RTSP si le téléchargement échoue.
+Méthode IDENTIQUE à zones.py (gris,
 flou gaussien (5,5), amplitude max-min par pixel sur les 15 images d'une
 seconde, seuil de pixel 25). Pour chaque pixel de la région, compte les
 secondes où il a bougé, puis dessine la région agrandie avec :
@@ -14,7 +17,7 @@ secondes où il a bougé, puis dessine la région agrandie avec :
     40 px, utilisables telles quelles pour une zone (x1, y1, x2, y2).
 
 Usage :
-    python3 outils_zones/carte_mouvement.py DATE HEURE --region X1,Y1,X2,Y2 [--canal N] [--duree 20]
+    python3 outils_zones/carte_mouvement.py DATE HEURE --region X1,Y1,X2,Y2 [--canal N] [--duree 60]
 
 Exemple (Encolleuse 2, caméra 10) :
     python3 outils_zones/carte_mouvement.py 2026-10-15 20:00:00 --canal 10 --region 160,120,680,360
@@ -32,6 +35,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import _commun  # noqa: E402
 from src.camera_stream import build_rtsp_playback_url, open_stream  # noqa: E402
 from zones import FLOU, FPS, SEUIL_PIXEL  # noqa: E402
+from machine_etat import lecture_dvr  # noqa: E402
 
 ZOOM = 2
 PAS_LIGNES = 10
@@ -98,8 +102,58 @@ def dessiner_carte(image, region, fraction, zoom=ZOOM, titre=""):
     return vue
 
 
-def nom_sortie(canal):
-    nom = "carte_mouvement" + (f"_canal{canal}" if canal is not None else "") + ".jpg"
+def lire_masques(capture, region, max_images):
+    """Lit jusqu'à `max_images` images de `capture`. Renvoie (première image,
+    [masque par seconde complète]). Une dernière seconde incomplète est
+    ignorée. Lève ValueError si la région sort de l'image."""
+    premiere, tampon, masques = None, [], []
+    for _ in range(max_images):
+        ret, frame = capture.read()
+        if not ret or frame is None:
+            break
+        if premiere is None:
+            premiere = frame
+            h, w = frame.shape[:2]
+            if region[2] > w or region[3] > h:
+                raise ValueError(f"région hors de l'image ({w}x{h})")
+        tampon.append(cv2.GaussianBlur(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), FLOU, 0))
+        if len(tampon) == FPS:
+            masques.append(masque_seconde(tampon, region))
+            tampon = []
+    return premiere, masques
+
+
+def lire_periode(debut, duree, region):
+    """Téléchargement HTTP de la période puis lecture locale ; repli RTSP si
+    le téléchargement échoue. Renvoie (première image, masques, méthode)."""
+    fin = debut + timedelta(seconds=duree)
+    max_images = duree * FPS + FPS
+    try:
+        with lecture_dvr.fenetre_telechargee(debut, fin) as (chemin, _):
+            capture, chemin_lu = lecture_dvr.ouvrir_fichier(chemin)
+            try:
+                premiere, masques = lire_masques(capture, region, max_images)
+            finally:
+                capture.release()
+                if chemin_lu != chemin:
+                    lecture_dvr._supprimer(chemin_lu)
+        return premiere, masques, "http"
+    except (lecture_dvr.ErreurTelechargement, lecture_dvr.ErreurLectureFichier,
+            lecture_dvr.ErreurPasDEnregistrement) as e:
+        print(f"Téléchargement HTTP impossible ({lecture_dvr.masquer(e)}) : relecture RTSP, plus lente.")
+    capture = open_stream(build_rtsp_playback_url(debut, fin))
+    try:
+        premiere, masques = lire_masques(capture, region, max_images)
+    finally:
+        capture.release()
+    return premiere, masques, "rtsp"
+
+
+def nom_sortie(canal, debut):
+    """Un fichier par caméra ET par heure : la carte « en marche » et la
+    carte « à l'arrêt » ne s'écrasent pas, pour les comparer."""
+    nom = "carte_mouvement" + (f"_canal{canal}" if canal is not None else "") + \
+        f"_{debut:%Y%m%d_%H%M}.jpg"
     return os.path.join(_commun.SORTIES_DIR, nom)
 
 
@@ -109,7 +163,7 @@ def main():
     parser.add_argument("heure")
     parser.add_argument("--region", type=lire_region, required=True, help="X1,Y1,X2,Y2 dans l'image source")
     parser.add_argument("--canal", type=int, help="caméra du DVR (défaut : CAMERA_CHANNEL du .env)")
-    parser.add_argument("--duree", type=int, default=20, help="secondes lues (défaut 20)")
+    parser.add_argument("--duree", type=int, default=60, help="secondes lues (défaut 60)")
     args = parser.parse_args()
     if args.canal is not None:
         os.environ["CAMERA_CHANNEL"] = str(args.canal)   # ce lancement seulement
@@ -119,34 +173,20 @@ def main():
         parser.error(f"format de date/heure invalide ({exc}). Attendu : AAAA-MM-JJ HH:MM:SS")
 
     print(f"Lecture de {args.duree} s à partir de {debut:%Y-%m-%d %H:%M:%S}...")
-    capture = open_stream(build_rtsp_playback_url(debut, debut + timedelta(seconds=args.duree)))
-    premiere, tampon, masques = None, [], []
     try:
-        for _ in range(args.duree * FPS + FPS):
-            ret, frame = capture.read()
-            if not ret or frame is None:
-                break
-            if premiere is None:
-                premiere = frame
-                h, w = frame.shape[:2]
-                if args.region[2] > w or args.region[3] > h:
-                    sys.exit(f"Région hors de l'image ({w}x{h}).")
-            tampon.append(cv2.GaussianBlur(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), FLOU, 0))
-            if len(tampon) == FPS:
-                masques.append(masque_seconde(tampon, args.region))
-                tampon = []
-    finally:
-        capture.release()
+        premiere, masques, methode = lire_periode(debut, args.duree, args.region)
+    except ValueError as e:
+        sys.exit(f"Erreur : {e}.")
     if premiere is None or not masques:
         sys.exit("Aucune seconde complète lue (DVR indisponible ou pas d'enregistrement à cette heure).")
 
     canal = args.canal if args.canal is not None else os.getenv("CAMERA_CHANNEL", "?")
     carte = dessiner_carte(premiere, args.region, fraction_par_pixel(masques),
                            titre=f"Camera {canal} - {debut:%Y-%m-%d %H:%M:%S} - {len(masques)} s")
-    sortie = nom_sortie(args.canal)
+    sortie = nom_sortie(args.canal, debut)
     os.makedirs(_commun.SORTIES_DIR, exist_ok=True)
     cv2.imwrite(sortie, carte)
-    print(f"OK : {sortie} ({len(masques)} s analysées)")
+    print(f"OK : {sortie} ({len(masques)} s analysées, lecture {methode})")
 
 
 if __name__ == "__main__":

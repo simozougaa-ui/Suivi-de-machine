@@ -213,7 +213,7 @@ class TestCarteMouvement(unittest.TestCase):
 
     def test_comparaison_garde_seulement_ce_qui_distingue_marche_et_arret(self):
         fm = np.zeros((20, 40)); fa = np.zeros((20, 40))
-        fm[5:10, 10:20] = 0.8              # tapis : bouge en marche seulement
+        fm[5:10, 10:20] = 0.25             # tapis lent : bouge 25 % du temps en marche seulement
         fm[0:3, 0:5] = 0.9; fa[0:3, 0:5] = 0.9   # bruit de nuit : bouge tout le temps
         d = carte_mouvement.masque_discriminant(fm, fa)
         self.assertTrue(d[5:10, 10:20].all())
@@ -227,6 +227,9 @@ class TestCarteMouvement(unittest.TestCase):
         self.assertEqual(zones[0], ((160, 80, 200, 100), 1.0))
         self.assertTrue(all(z[1] < 1.0 for z in zones[1:]))     # pas deux fois le même bloc
         self.assertEqual(carte_mouvement.proposer_zones(np.zeros((100, 200), bool), region), [])
+        # Écart faible mais réel (machine lente) : quand même proposé.
+        ecart = np.zeros((100, 200)); ecart[10:30, 20:60] = 0.2
+        self.assertEqual(carte_mouvement.proposer_zones(ecart, region, n=1)[0][0], (120, 60, 160, 80))
 
     def test_dessin_de_la_comparaison(self):
         image = np.zeros((120, 200, 3), dtype=np.uint8)

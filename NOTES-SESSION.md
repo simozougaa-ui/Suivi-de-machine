@@ -3231,3 +3231,35 @@ Sortie : `carte_comparaison_canal10_<marche>_vs_<arrêt>.jpg`.
 
 Tests : outils_zones 47/47 (+3 : seul ce qui distingue est gardé,
 propositions sans chevauchement, dessin).
+
+### Comparaison de nuit : sans le seuil des 40 %
+
+Premier essai de la comparaison (nuit, pause de 01:15 comme arrêt) :
+- **22:30 contre 01:15 :** presque aucun pixel rouge ; les propositions
+  P1, P2 et P3 sont toutes « NON ». P1 bouge à 100 % aux deux heures :
+  c'est du bruit.
+- **04:00 contre 01:15 :** aucun pixel « ≥ 40 % en marche et < 10 % à
+  l'arrêt ».
+
+Pourtant, d'après le patron, la machine tournait aux deux heures.
+
+Cause : la nuit, la machine tourne **lentement ou par à-coups**, et aucun
+endroit ne bouge 40 % du temps. Ce seuil vient de Bob B et Bob C, qui
+tournent en continu.
+
+Décision : le rouge et les propositions reposent maintenant sur l'**écart**
+entre la part des secondes en mouvement en marche et celle à l'arrêt.
+- **Rouge :** écart d'au moins 15 points.
+- **Propositions :** les rectangles au plus grand écart moyen, même
+  faible.
+
+Les zones sont toujours mesurées aux deux heures. Le seuil propre à
+l'Encolleuse 2 sera fixé sur ces mesures, à condition de rester loin de
+l'arrêt.
+
+Nouvelle protection à prévoir dans la détection : **image noire ou
+clignotante**. La carte de 00:00 est entièrement rouge, sans photo
+derrière, et les deux zones donnent un chiffre identique : toute l'image
+change. Une seconde où toute l'image bouge ne devra pas compter.
+
+Tests : outils_zones 47/47.

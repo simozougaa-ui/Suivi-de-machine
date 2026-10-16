@@ -25,10 +25,11 @@ marche ET une heure d'arrêt : la bonne zone est celle qui sépare les deux.
 
 Avec --arret DATE HEURE (16/10, réglage de NUIT de l'Encolleuse 2) : carte de
 COMPARAISON entre l'heure donnée (machine EN MARCHE) et une heure où elle est
-À L'ARRÊT, la même nuit de préférence. En ROUGE seulement ce qui bouge en
-marche (>= 40 % des secondes) ET reste immobile à l'arrêt (< 10 %) ; en JAUNE
-ce qui bouge aussi à l'arrêt (bruit de nuit, passages) : inutilisable. Les
-meilleurs rectangles 40x20 du rouge sont proposés en VERT avec leurs
+À L'ARRÊT, la même nuit de préférence. En ROUGE ce qui bouge nettement plus
+souvent en marche qu'à l'arrêt (écart >= 15 points de % des secondes : une
+machine lente ou par à-coups ne bouge jamais 40 % du temps) ; en JAUNE ce qui
+bouge sans faire la différence (bruit de nuit, passages). Les 3 rectangles
+40x20 au plus grand écart moyen sont proposés en VERT avec leurs
 coordonnées, et toutes les zones (--zones et proposées) sont mesurées aux
 deux heures.
 
@@ -225,26 +226,38 @@ JAUNE = (0, 220, 255)
 TAILLE_ZONE_PROPOSEE = (40, 20)
 
 
-def masque_discriminant(f_marche, f_arret):
-    """Pixels qui bougent en marche (>= 40 % des secondes) et restent
-    immobiles à l'arrêt (< 10 %) : ceux qui distinguent vraiment les deux."""
-    return (f_marche >= FRACTION_CONTINU) & (f_arret < FRACTION_PASSAGE)
+# Nuit du 15-16/10 : l'Encolleuse 2 tourne lentement / par à-coups, aucun
+# pixel ne bouge 40 % du temps. Le rouge et les propositions se fondent donc
+# sur l'ÉCART entre marche et arrêt (part des secondes en mouvement en marche
+# moins à l'arrêt), pas sur le seuil des 40 % de Bob B / Bob C.
+ECART_ROUGE = 0.15
 
 
-def proposer_zones(discriminant, region, taille=TAILLE_ZONE_PROPOSEE, n=3):
-    """Les `n` rectangles `taille` (sans chevauchement) les plus remplis de
-    pixels discriminants. Renvoie [((x1, y1, x2, y2), densité 0-1), ...] en
-    coordonnées de l'image source."""
+def ecart_marche_arret(f_marche, f_arret):
+    """Écart (0-1) entre la part des secondes où chaque pixel bouge en
+    marche et à l'arrêt ; 0 si le pixel bouge autant (ou plus) à l'arrêt."""
+    return np.clip(f_marche - f_arret, 0.0, 1.0)
+
+
+def masque_discriminant(f_marche, f_arret, ecart_min=ECART_ROUGE):
+    """Pixels qui bougent nettement plus souvent en marche qu'à l'arrêt."""
+    return ecart_marche_arret(f_marche, f_arret) >= ecart_min
+
+
+def proposer_zones(score, region, taille=TAILLE_ZONE_PROPOSEE, n=3):
+    """Les `n` rectangles `taille` (sans chevauchement) au score moyen le plus
+    élevé (`score` : booléen ou écart 0-1 par pixel). Renvoie
+    [((x1, y1, x2, y2), score moyen 0-1), ...] en coordonnées de la source."""
     w, h = taille
-    H, W = discriminant.shape
+    H, W = score.shape
     if H < h or W < w:
         return []
-    ii = cv2.integral(discriminant.astype(np.uint8)).astype(np.int64)
+    ii = cv2.integral(score.astype(np.float64))
     dens = (ii[h:, w:] - ii[:-h, w:] - ii[h:, :-w] + ii[:-h, :-w]) / float(w * h)
     choisies = []
     for _ in range(n):
         y, x = np.unravel_index(int(np.argmax(dens)), dens.shape)
-        if dens[y, x] <= 0:
+        if dens[y, x] <= 1e-9:
             break
         choisies.append(((region[0] + x, region[1] + y, region[0] + x + w, region[1] + y + h),
                          float(dens[y, x])))
@@ -328,11 +341,12 @@ def main():
         if not masques_arret:
             sys.exit("Aucune seconde complète lue à l'heure d'arrêt.")
         f_marche = fraction_par_pixel(masques)
-        discriminant = masque_discriminant(f_marche, fraction_par_pixel(masques_arret))
+        f_arret = fraction_par_pixel(masques_arret)
+        discriminant = masque_discriminant(f_marche, f_arret)
         carte = dessiner_comparaison(
             premiere, args.region, discriminant, f_marche,
             titre=f"Camera {canal} - marche {debut:%d/%m %H:%M} vs arret {debut_arret:%d/%m %H:%M}")
-        proposees = proposer_zones(discriminant, args.region)
+        proposees = proposer_zones(ecart_marche_arret(f_marche, f_arret), args.region)
         dessiner_zones(carte, args.region, args.zones)
         rx1, ry1 = args.region[0], args.region[1]
         for i, (z, _) in enumerate(proposees, 1):
@@ -341,9 +355,9 @@ def main():
             cv2.putText(carte, f"P{i}", ((z[0] - rx1) * ZOOM + 3, (z[1] - ry1) * ZOOM - 4),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, VERT, 2, cv2.LINE_AA)
         if not proposees:
-            print("Aucun pixel ne bouge en marche en restant immobile à l'arrêt.")
+            print("Aucun pixel ne bouge plus souvent en marche qu'à l'arrêt.")
         a_mesurer = [(f"zone {i}", z) for i, z in enumerate(args.zones, 1)] + \
-            [(f"P{i} (proposée, {100 * d:.0f} % de rouge)", z) for i, (z, d) in enumerate(proposees, 1)]
+            [(f"P{i} (proposée, écart {100 * d:.0f})", z) for i, (z, d) in enumerate(proposees, 1)]
         print(f"Zones mesurées (marche {debut:%d/%m %H:%M} / arrêt {debut_arret:%d/%m %H:%M}) :")
         for nom, z in a_mesurer:
             pm, _, vm = mesurer_zone(masques, args.region, z)

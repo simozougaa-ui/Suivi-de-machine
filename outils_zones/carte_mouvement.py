@@ -285,9 +285,13 @@ def dessiner_comparaison(image, region, discriminant, f_marche, zoom=ZOOM, titre
     return vue
 
 
-def nom_sortie_comparaison(canal, debut, debut_arret):
+def nom_sortie_comparaison(canal, debut, debut_arret, ecart=ECART_ROUGE * 100):
+    """Le réglage --ecart (s'il n'est pas celui par défaut) fait partie du nom :
+    deux réglages ne s'écrasent pas, et le navigateur ne peut pas confondre
+    une nouvelle carte avec une ancienne gardée en mémoire."""
+    suffixe = "" if abs(ecart - ECART_ROUGE * 100) < 1e-9 else f"_ecart{ecart:g}"
     nom = "carte_comparaison" + (f"_canal{canal}" if canal is not None else "") + \
-        f"_{debut:%Y%m%d_%H%M}_vs_{debut_arret:%Y%m%d_%H%M}.jpg"
+        f"_{debut:%Y%m%d_%H%M}_vs_{debut_arret:%Y%m%d_%H%M}{suffixe}.jpg"
     return os.path.join(_commun.SORTIES_DIR, nom)
 
 
@@ -374,7 +378,7 @@ def main():
             bon = "OK" if (vm, va) == ("marche", "arret") else "NON"
             print(f"  {nom} {z[0]},{z[1]},{z[2]},{z[3]} : marche {pm:5.1f} % -> {vm} ; "
                   f"arrêt {pa:5.1f} % -> {va}  [{bon}]")
-        sortie = nom_sortie_comparaison(args.canal, debut, debut_arret)
+        sortie = nom_sortie_comparaison(args.canal, debut, debut_arret, args.ecart)
         os.makedirs(_commun.SORTIES_DIR, exist_ok=True)
         cv2.imwrite(sortie, carte)
         print(f"OK : {sortie}")

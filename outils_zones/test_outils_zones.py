@@ -243,6 +243,12 @@ class TestCarteMouvement(unittest.TestCase):
         carte = carte_mouvement.dessiner_comparaison(image, self.region, d, d.astype(float))
         self.assertEqual(carte.shape, (40, 80, 3))
 
+    def test_le_reglage_d_ecart_fait_partie_du_nom(self):
+        m, a = datetime(2026, 10, 15, 22, 31), datetime(2026, 10, 16, 1, 10)
+        defaut = carte_mouvement.nom_sortie_comparaison(10, m, a)
+        self.assertTrue(defaut.endswith("carte_comparaison_canal10_20261015_2231_vs_20261016_0110.jpg"))
+        self.assertTrue(carte_mouvement.nom_sortie_comparaison(10, m, a, 8).endswith("_vs_20261016_0110_ecart8.jpg"))
+
     def test_une_carte_par_heure(self):
         nom = carte_mouvement.nom_sortie(10, datetime(2026, 10, 15, 20, 0))
         self.assertTrue(nom.endswith("carte_mouvement_canal10_20261015_2000.jpg"))

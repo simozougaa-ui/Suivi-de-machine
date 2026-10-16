@@ -3333,3 +3333,9 @@ Elle est petite, vers (480, 315). Pas de changement de zone tant que les
 mesures ne le disent pas.
 
 Tests : outils_zones 48/48.
+
+Le réglage `--ecart` fait maintenant partie du nom du fichier
+(`..._ecart8.jpg`) : deux réglages ne s'écrasent pas, et le navigateur ne
+confond plus une carte neuve avec une ancienne mise en cache (les
+rechargements montraient la même image alors que le seuil avait changé).
+Tests : outils_zones 49/49.

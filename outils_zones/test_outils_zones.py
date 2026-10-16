@@ -196,6 +196,21 @@ class TestCarteMouvement(unittest.TestCase):
         _, masques = carte_mouvement.lire_masques(Capture(150), self.region, 1000, pas=3)
         self.assertEqual(len(masques), 50)          # 150 images à 3 img/s = 50 s
 
+    def test_mesure_d_une_zone_avec_la_regle_de_la_detection(self):
+        # 10 secondes : le tapis (110..120, 55..60) bouge pendant 6 d'entre elles.
+        masques = [carte_mouvement.masque_seconde(self._seconde(i < 6), self.region) for i in range(10)]
+        pct, moyen, verdict = carte_mouvement.mesurer_zone(masques, self.region, (108, 54, 122, 61))
+        self.assertAlmostEqual(pct, 60.0)
+        self.assertEqual(verdict, "marche")
+        pct_vide, _, verdict_vide = carte_mouvement.mesurer_zone(masques, self.region, (125, 62, 138, 69))
+        self.assertEqual((pct_vide, verdict_vide), (0.0, "arret"))
+        with self.assertRaises(ValueError):
+            carte_mouvement.mesurer_zone(masques, self.region, (90, 50, 120, 60))
+
+    def test_lire_zones(self):
+        self.assertEqual(carte_mouvement.lire_zones("565,170,620,190;430,210,500,235"),
+                         [(565, 170, 620, 190), (430, 210, 500, 235)])
+
     def test_une_carte_par_heure(self):
         nom = carte_mouvement.nom_sortie(10, datetime(2026, 10, 15, 20, 0))
         self.assertTrue(nom.endswith("carte_mouvement_canal10_20261015_2000.jpg"))

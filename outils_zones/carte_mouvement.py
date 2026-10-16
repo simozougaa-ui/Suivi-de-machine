@@ -16,8 +16,15 @@ secondes où il a bougé, puis dessine la région agrandie avec :
   - une grille tous les 10 px et les coordonnées de l'image source tous les
     40 px, utilisables telles quelles pour une zone (x1, y1, x2, y2).
 
+Avec --zones « x1,y1,x2,y2;x1,y1,x2,y2;... » : chaque zone candidate est
+dessinée en BLEU (numérotée) et mesurée avec la règle de la détection de
+la machine 2 (Bob C) : une seconde est « en mouvement » si plus de 5 % des
+pixels de la zone dépassent l'amplitude 25 ; la période est « marche » si
+plus de 40 % des secondes sont en mouvement. À lancer sur une heure de
+marche ET une heure d'arrêt : la bonne zone est celle qui sépare les deux.
+
 Usage :
-    python3 outils_zones/carte_mouvement.py DATE HEURE --region X1,Y1,X2,Y2 [--canal N] [--duree 60]
+    python3 outils_zones/carte_mouvement.py DATE HEURE --region X1,Y1,X2,Y2 [--canal N] [--duree 60] [--zones Z1;Z2]
 
 Exemple (Encolleuse 2, caméra 10) :
     python3 outils_zones/carte_mouvement.py 2026-10-15 20:00:00 --canal 10 --region 160,120,680,360
@@ -34,7 +41,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import _commun  # noqa: E402
 from src.camera_stream import build_rtsp_playback_url, open_stream  # noqa: E402
-from zones import FLOU, FPS, SEUIL_PIXEL  # noqa: E402
+from zones import FLOU, FPS, SEUIL_PIXEL, SEUIL_SECONDE_POURCENT  # noqa: E402
 from machine_etat import lecture_dvr  # noqa: E402
 
 ZOOM = 2
@@ -57,6 +64,42 @@ def lire_region(texte):
     if x1 < 0 or y1 < 0 or x2 <= x1 or y2 <= y1:
         raise argparse.ArgumentTypeError("région invalide : il faut 0 <= x1 < x2 et 0 <= y1 < y2")
     return x1, y1, x2, y2
+
+
+BLEU = (255, 128, 0)
+
+
+def lire_zones(texte):
+    """« x1,y1,x2,y2;x1,y1,x2,y2 » -> [(x1, y1, x2, y2), ...]."""
+    zones = [lire_region(z.strip()) for z in texte.split(";") if z.strip()]
+    if not zones:
+        raise argparse.ArgumentTypeError("au moins une zone attendue")
+    return zones
+
+
+def mesurer_zone(masques, region, zone):
+    """Règle de la détection (machine 2) appliquée à `zone` (coordonnées de
+    l'image source, incluse dans `region`). Renvoie (% de secondes en
+    mouvement, % moyen de pixels en mouvement, verdict)."""
+    rx1, ry1, rx2, ry2 = region
+    x1, y1, x2, y2 = zone
+    if x1 < rx1 or y1 < ry1 or x2 > rx2 or y2 > ry2:
+        raise ValueError(f"zone {zone} hors de la région {region}")
+    fractions = [100.0 * float(m[y1 - ry1:y2 - ry1, x1 - rx1:x2 - rx1].mean()) for m in masques]
+    en_mouvement = sum(1 for f in fractions if f > SEUIL_SECONDE_POURCENT)
+    pct = 100.0 * en_mouvement / len(fractions)
+    return pct, sum(fractions) / len(fractions), ("marche" if pct > 100 * FRACTION_CONTINU else "arret")
+
+
+def dessiner_zones(carte, region, zones, zoom=ZOOM):
+    rx1, ry1 = region[0], region[1]
+    for i, (x1, y1, x2, y2) in enumerate(zones, 1):
+        a = ((x1 - rx1) * zoom, (y1 - ry1) * zoom)
+        b = ((x2 - rx1) * zoom, (y2 - ry1) * zoom)
+        cv2.rectangle(carte, a, b, BLEU, 2)
+        cv2.putText(carte, str(i), (a[0] + 3, a[1] - 4), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.7, BLEU, 2, cv2.LINE_AA)
+    return carte
 
 
 def masque_seconde(images_grises_floutees, region, seuil_pixel=SEUIL_PIXEL):
@@ -183,7 +226,12 @@ def main():
     parser.add_argument("--region", type=lire_region, required=True, help="X1,Y1,X2,Y2 dans l'image source")
     parser.add_argument("--canal", type=int, help="caméra du DVR (défaut : CAMERA_CHANNEL du .env)")
     parser.add_argument("--duree", type=int, default=60, help="secondes lues (défaut 60)")
+    parser.add_argument("--zones", type=lire_zones, default=[],
+                        help="zones candidates « x1,y1,x2,y2;x1,y1,x2,y2 » à mesurer et dessiner")
     args = parser.parse_args()
+    for z in args.zones:
+        if z[0] < args.region[0] or z[1] < args.region[1] or z[2] > args.region[2] or z[3] > args.region[3]:
+            parser.error(f"zone {z} hors de la région {args.region}")
     if args.canal is not None:
         os.environ["CAMERA_CHANNEL"] = str(args.canal)   # ce lancement seulement
     try:
@@ -202,6 +250,14 @@ def main():
     canal = args.canal if args.canal is not None else os.getenv("CAMERA_CHANNEL", "?")
     carte = dessiner_carte(premiere, args.region, fraction_par_pixel(masques),
                            titre=f"Camera {canal} - {debut:%Y-%m-%d %H:%M:%S} - {len(masques)} s")
+    if args.zones:
+        dessiner_zones(carte, args.region, args.zones)
+        print(f"Zones (seconde en mouvement si > {SEUIL_SECONDE_POURCENT:g} % de la zone bouge ; "
+              f"marche si > {100 * FRACTION_CONTINU:g} % des secondes) :")
+        for i, z in enumerate(args.zones, 1):
+            pct, moyen, verdict = mesurer_zone(masques, args.region, z)
+            print(f"  zone {i} {z[0]},{z[1]},{z[2]},{z[3]} : {pct:5.1f} % des secondes en mouvement, "
+                  f"{moyen:5.1f} % de pixels en moyenne -> {verdict}")
     sortie = nom_sortie(args.canal, debut)
     os.makedirs(_commun.SORTIES_DIR, exist_ok=True)
     cv2.imwrite(sortie, carte)

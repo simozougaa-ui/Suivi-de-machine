@@ -3085,3 +3085,37 @@ détection (`analyser_capture`, `FPS_SUPPOSE` = 15) devra prendre la
 cadence de chaque caméra.
 
 Tests : outils_zones 43/43.
+
+### Caméra 10, étape 3 : zones candidates mesurées
+
+Les 10 s du 15/10 à 20:00 ne venaient ni de la caméra ni des outils. Le DVR
+a été redémarré à la main à 19:59:50 (déblocage du soir) et n'est revenu
+qu'à 20:02 : la caméra 10 n'a été enregistrée que jusqu'à ~20:00:10. DMSS
+confirme que la caméra 10 enregistre en continu (barre verte).
+
+Carte du 15/10 à 19:50, 60 s, Encolleuse 2 en marche :
+- en rouge (mouvement continu), une ligne de points en diagonale, d'environ
+  (265, 288) à (615, 175) : la ligne de transport de la machine ;
+- en orange, des taches au-dessus (x 320-570, y 130-230) : des personnes,
+  à éviter.
+
+Décision : plutôt qu'un grand rectangle (une machine en diagonale + des
+passages), on mesure de **petites zones sur la ligne rouge, loin de
+l'orange**, et on garde celle qui sépare le mieux la marche de l'arrêt.
+
+Candidates (lues sur une capture d'écran, à ±5-10 px près) :
+- zone 1 : 565,170,620,190 (haut droite, sortie) ;
+- zone 2 : 430,208,500,234 (milieu) ;
+- zone 3 : 275,266,320,284 (bas gauche).
+
+Nouvelle option de `carte_mouvement.py` : `--zones "x1,y1,x2,y2;..."`.
+Elle dessine chaque zone en bleu, numérotée, et la mesure avec la règle de
+la détection de Bob C :
+- une seconde est en mouvement si plus de 5 % de la zone dépasse
+  l'amplitude 25 ;
+- la période est en marche si plus de 40 % des secondes sont en mouvement.
+
+Elle affiche aussi le % de secondes et le % moyen de pixels en mouvement.
+À lancer à une heure de marche ET à une heure d'arrêt.
+
+Tests : outils_zones 45/45.

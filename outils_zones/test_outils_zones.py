@@ -16,6 +16,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _commun  # noqa: E402
+import carte_mouvement  # noqa: E402
 import quadrillage  # noqa: E402
 import seuils  # noqa: E402
 import vitesse_lecture  # noqa: E402
@@ -113,6 +114,47 @@ class TestQuadrillageEntier(unittest.TestCase):
         self.assertEqual(quadrillage.nom_sortie(), quadrillage.FICHIER_SORTIE)
         self.assertTrue(quadrillage.nom_sortie(10, True).endswith("quadrillage_canal10_entier.jpg"))
         self.assertTrue(quadrillage.nom_sortie(None, True).endswith("quadrillage_entier.jpg"))
+
+
+class TestCarteMouvement(unittest.TestCase):
+    """16/10 : carte de mouvement pour placer la zone de l'Encolleuse 2."""
+    region = (100, 50, 140, 70)
+
+    def _seconde(self, bouge):
+        images = []
+        for i in range(15):
+            img = np.full((120, 200), 100, dtype=np.uint8)
+            if bouge and i % 2:
+                img[55:60, 110:120] = 200          # un tapis qui bouge
+            images.append(img)
+        return images
+
+    def test_seuls_les_pixels_qui_bougent_sont_marques(self):
+        m = carte_mouvement.masque_seconde(self._seconde(True), self.region)
+        self.assertEqual(m.shape, (20, 40))
+        self.assertTrue(m[5:10, 10:20].all())       # (110..120, 55..60) dans la région
+        self.assertEqual(int(m.sum()), 50)
+
+    def test_fraction_des_secondes_et_couleurs(self):
+        masques = [carte_mouvement.masque_seconde(self._seconde(i < 3), self.region) for i in range(5)]
+        fraction = carte_mouvement.fraction_par_pixel(masques)
+        self.assertAlmostEqual(float(fraction[6, 12]), 0.6)
+        image = np.zeros((120, 200, 3), dtype=np.uint8)
+        carte = carte_mouvement.dessiner_carte(image, self.region, fraction)
+        self.assertEqual(carte.shape, (20 * carte_mouvement.ZOOM, 40 * carte_mouvement.ZOOM, 3))
+        rouge = carte[6 * carte_mouvement.ZOOM + 1, 12 * carte_mouvement.ZOOM + 1]
+        self.assertGreater(int(rouge[2]), int(rouge[1]))   # rouge dominant
+
+    def test_region_invalide_refusee(self):
+        import argparse
+        self.assertEqual(carte_mouvement.lire_region("160,120,680,360"), (160, 120, 680, 360))
+        for mauvais in ("1,2,3", "10,10,5,20", "a,b,c,d"):
+            with self.assertRaises(argparse.ArgumentTypeError):
+                carte_mouvement.lire_region(mauvais)
+
+    def test_aucune_seconde_leve(self):
+        with self.assertRaises(ValueError):
+            carte_mouvement.fraction_par_pixel([])
 
 
 class TestAmplitudeParSeuil(unittest.TestCase):

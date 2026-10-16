@@ -3006,3 +3006,39 @@ Tests : outils_zones 34/34 (+2 : image entière à la taille de la source
 sans modifier la source, noms de sortie distincts).
 Non vérifié ici (aucun accès DVR) : la taille réelle des images de la
 caméra 10.
+
+## Caméra 10, étape 2 : carte de mouvement de l'Encolleuse 2
+
+Le patron a indiqué la machine : **Encolleuse 2**, la longue machine en
+diagonale entourée en bleu sur le quadrillage du 15/10 à 20:00. Dans
+l'image d'origine, elle va d'environ (230, 310) à (640, 160).
+
+La zone de détection est un rectangle, et la machine est en diagonale. Un
+grand rectangle prendrait aussi le sol et les passages autour. Pour choisir
+un ou plusieurs petits rectangles sur ce qui bouge VRAIMENT quand la machine
+tourne, il faut une mesure, pas un choix à l'œil.
+
+Nouvel outil `outils_zones/carte_mouvement.py` :
+- lit `--duree` secondes (20 par défaut) à pleine cadence ;
+- même calcul que `zones.py` : gris, flou (5,5), amplitude max-min sur
+  15 images, seuil 25 ;
+- compte, pour chaque pixel de `--region`, les secondes où il bouge ;
+- dessine la région agrandie 2×, avec :
+  - en ROUGE ce qui bouge au moins 40 % du temps (la règle de la
+    détection) ;
+  - en ORANGE ce qui bouge 10 à 40 % du temps (passages, gestes) ;
+  - une grille tous les 10 px ;
+  - les coordonnées de l'image source tous les 40 px, utilisables telles
+    quelles pour une zone.
+- `--canal N` comme `quadrillage.py` : le `.env` n'est pas modifié.
+
+Sortie : `outils_zones/sorties/carte_mouvement_canal10.jpg`.
+
+Commande (une ligne, sans sudo) :
+
+    cd ~/suivi-de-machine && .venv/bin/python3 outils_zones/carte_mouvement.py 2026-10-15 20:00:00 --canal 10 --region 160,120,680,360
+
+Tests : outils_zones 38/38 (+4 : seuls les pixels qui bougent sont
+marqués, part des secondes et couleur, région invalide refusée, aucune
+seconde lue).
+Non vérifié ici : le rendu sur une vraie image de la caméra 10.

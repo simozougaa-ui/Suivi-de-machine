@@ -2965,3 +2965,44 @@ DVR.
 
 Tests : 123/123 (+3 : raté isolé retenté sans compter comme panne, deux
 ratés = échec, DVR muet non retenté).
+
+---
+
+# Ajout de la caméra 10 (2026-10-16) — étape 1 : repérer la machine
+
+Demande du patron : « ajouter la caméra 10 pour capter la marche / l'arrêt
+d'une machine ».
+
+Démarche, la même que pour Bob B et Bob C (caméra 15) :
+1. voir l'image entière de la caméra 10, avec ses coordonnées ;
+2. choisir une zone de mouvement sur la machine ;
+3. mesurer cette zone à des heures de marche et d'arrêt connues pour
+   régler les seuils (`zones.py`, `seuils.py`) ;
+4. seulement ensuite, brancher la caméra dans la détection automatique et
+   déclarer la machine dans l'application. Il n'y aura pas de nouvelle page
+   ni de route : la machine prend sa place dans « La journée », à côté des
+   autres.
+
+Étape 1 (ce commit) : `outils_zones/quadrillage.py` reçoit deux options.
+- `--canal N` : lit la caméra N au lieu de `CAMERA_CHANNEL` du `.env`. Le
+  `.env` n'est pas modifié : la caméra 15 reste celle de la détection.
+- `--entier` : toute l'image (taille d'origine, sans agrandissement), grille
+  tous les 40 px, coordonnées tous les 80 px, titre « Camera N – date
+  heure ». Ce sont les coordonnées de l'image source, donc utilisables
+  telles quelles pour une zone.
+
+Sortie : `outils_zones/sorties/quadrillage_canal10_entier.jpg`. Le nom ne
+change pas sans option, et l'image de la caméra 15 n'est pas écrasée.
+
+Commande (une ligne, sans sudo) :
+
+    cd ~/suivi-de-machine && .venv/bin/python3 outils_zones/quadrillage.py 2026-10-15 11:00:00 --canal 10 --entier
+
+Pour la voir sur le téléphone (Ctrl+C pour arrêter) :
+
+    cd ~/suivi-de-machine && .venv/bin/python3 outils_zones/servir.py
+
+Tests : outils_zones 34/34 (+2 : image entière à la taille de la source
+sans modifier la source, noms de sortie distincts).
+Non vérifié ici (aucun accès DVR) : la taille réelle des images de la
+caméra 10.

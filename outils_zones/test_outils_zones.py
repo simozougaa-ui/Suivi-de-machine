@@ -99,6 +99,22 @@ class TestQuadrillage(unittest.TestCase):
         self.assertEqual(resultat.shape[0], (y2 - y1) * quadrillage.ZOOM)
 
 
+class TestQuadrillageEntier(unittest.TestCase):
+    """16/10 : image entière d'une nouvelle caméra (caméra 10)."""
+
+    def test_meme_taille_que_l_image_source_et_source_intacte(self):
+        frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+        resultat = quadrillage.construire_quadrillage_entier(frame, "Camera 10")
+        self.assertEqual(resultat.shape, frame.shape)   # coordonnées = celles de la source
+        self.assertEqual(int(frame.sum()), 0)           # l'image source n'est pas modifiée
+        self.assertGreater(int(resultat.sum()), 0)      # grille dessinée
+
+    def test_noms_de_sortie_ne_s_ecrasent_pas(self):
+        self.assertEqual(quadrillage.nom_sortie(), quadrillage.FICHIER_SORTIE)
+        self.assertTrue(quadrillage.nom_sortie(10, True).endswith("quadrillage_canal10_entier.jpg"))
+        self.assertTrue(quadrillage.nom_sortie(None, True).endswith("quadrillage_entier.jpg"))
+
+
 class TestAmplitudeParSeuil(unittest.TestCase):
     """seuils.py : amplitude_zone calculée UNE fois sur les images,
     fraction_au_dessus évaluée ensuite pour chaque seuil sans jamais

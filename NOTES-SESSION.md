@@ -3459,3 +3459,32 @@ Comparaison à faire : frise de Bob B (caméra 15) sur la même période. Si
 elle est pleine, le défaut est propre à la caméra 10.
 
 Aucun changement de code.
+
+### Décision du patron (16/10, 21:20) : laisser les images abîmées en gris
+
+Captures DMSS de la caméra 10, relecture du 16/10 :
+- 15:04:51 : bandes colorées (signal détruit) ;
+- 15:05:10 et 15:06:03 : écran noir ;
+- 15:05:00 et 15:05:55 : image propre.
+
+La frise de Bob B (caméra 15) est pleine à 15 h : le défaut est propre à la
+caméra 10 (câble, alimentation ou interférence, à régler sur place).
+
+Décision du patron : continuer à régler la programmation et les seuils, et
+laisser en gris (« non mesuré ») les minutes dont l'image est détruite. Le
+jour où le problème matériel sera réglé, les données arriveront toutes
+seules, avec les mêmes zones et les mêmes seuils. Aucun changement de code :
+la protection « image perturbée » fait déjà exactement cela.
+
+Les minutes grises déjà passées ne se récupèrent pas : le DVR a enregistré
+l'image détruite. Seules les minutes futures seront mesurées.
+
+Réglages en place pour l'Encolleuse 2 (machine-3, caméra 10) :
+- zones 548,172,588,192 et 576,163,616,183 (au moins une qui bouge) ;
+- amplitude 25, 5 % de la zone, flou 5×5 ;
+- « marche » si plus de 12 % des secondes en mouvement ;
+- seconde ignorée si plus de 50 % de toute l'image change.
+
+Point non tranché : à 22:31 (marche très lente) la zone A donne 11,7 %, soit
+« arrêt » de peu. À confirmer : la machine tournait-elle à 22:32 et 22:33 ?
+Si oui, baisser le seuil vers 10 % (la pause monte à 8,3 % par minute).

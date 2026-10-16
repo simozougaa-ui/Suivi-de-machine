@@ -3432,3 +3432,30 @@ bonne / mauvaise), les écarter et mesurer avec les bonnes. L'outil a une
 option `--trace N` qui affiche la luminosité image par image pour le voir.
 
 Tests : outils_zones 57/57.
+
+### Trace image par image (16/10 21:09) : l'image de la caméra 10 est détruite par moments
+
+Luminosité moyenne de l'image, image par image (normale : 98-99) :
+- 15:05:00 : 99 99 98 98 98 99… stable, image propre ;
+- 15:07:30 : 1 81 89 90 101 2 1 1 1 1 1 20 114 121 126 103 36 110… ;
+- 15:12:00 : 97 43 128 121 104 3 5 14 126 41 98 20 46 116… (2 images
+  normales sur 45) ;
+- 15:22:00 : 50 48 2 89 133 65 110 105 3 6 105 117 42 3…
+
+Les valeurs sautent au hasard entre presque noir et très clair : pas
+d'alternance bonne / mauvaise, donc pas d'image à récupérer en écartant les
+mauvaises. Les fichiers (150-177 Mo au lieu de 56) sont lourds parce que
+l'image est pleine de bruit. Le défaut est intermittent : image propre à
+15:00-15:05, abîmée environ de 15:05 à 15:34, propre à partir de 15:35.
+
+Conclusion : ce n'est pas le programme, et la protection est juste. Les
+zones restent bonnes quand l'image est propre (16/10 15:00 marche, 15:40
+arrêt, accord avec la frise). Les minutes abîmées restent « non mesurées »
+(aucune fausse mesure).
+
+Cause probable : défaut matériel du signal de la caméra 10 (câble ou
+connecteurs, alimentation, interférence électrique). À vérifier sur place.
+Comparaison à faire : frise de Bob B (caméra 15) sur la même période. Si
+elle est pleine, le défaut est propre à la caméra 10.
+
+Aucun changement de code.

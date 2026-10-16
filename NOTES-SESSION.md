@@ -3488,3 +3488,28 @@ Réglages en place pour l'Encolleuse 2 (machine-3, caméra 10) :
 Point non tranché : à 22:31 (marche très lente) la zone A donne 11,7 %, soit
 « arrêt » de peu. À confirmer : la machine tournait-elle à 22:32 et 22:33 ?
 Si oui, baisser le seuil vers 10 % (la pause monte à 8,3 % par minute).
+
+### 16/10, 21:50 : la machine tourne par à-coups, le seuil de 12 % à mesurer sur de longues périodes
+
+Réponse du patron : à 22:32 et 22:33 la machine TOURNAIT, mais en repartant par
+à-coups. Il prévient : en baissant beaucoup le seuil, des arrêts donnent 10 à
+15 %.
+
+Constat (22:25 → 22:35, % de secondes en mouvement par minute) : 21,7 / 20,0 /
+33,3 / 26,7 / 15,0 / 18,3 / **11,7 / 8,3 / 1,7** / 13,3. La pause de 01:05 →
+01:24 monte jusqu'à 8,3 %. Les minutes lentes de la marche (8,3 et 1,7) valent
+donc celles d'une pause : abaisser le seuil ne les récupère pas sans classer
+aussi des arrêts en marche.
+
+Décision : mesurer avant de choisir. Nouvel outil
+`outils_zones/distribution_encolleuse.py DATE DEBUT FIN` : même lecture que la
+détection, % par minute sur une période connue, nombre de minutes au-dessus de
+8, 10, 12 et 15 %. À lancer sur 3 périodes d'arrêt (pause du 16/10 01:00 →
+01:30, arrêt du matin 16/10 06:10 → 07:10, pause du 15/10 12:55 → 13:35) et 3
+périodes de marche (15/10 19:40 → 20:10, 15/10 22:20 → 22:50, 16/10 03:50 →
+04:20). Le seuil sera choisi sur ces chiffres. Piste si les deux se
+chevauchent : tolérer les arrêts très courts (2-3 minutes) entre deux minutes
+de marche, à décider avec le patron (cela cacherait aussi de vrais petits
+arrêts).
+
+Tests : outils_zones 60/60.

@@ -9,7 +9,7 @@ Usage :
 import os
 import sys
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import numpy as np
 
@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _commun  # noqa: E402
 import carte_mouvement  # noqa: E402
+import distribution_encolleuse  # noqa: E402
 import image_perturbee  # noqa: E402
 import quadrillage  # noqa: E402
 import seuils  # noqa: E402
@@ -338,6 +339,43 @@ class TestImagePerturbee(unittest.TestCase):
         self.assertIn("3 s", ligne)
         self.assertIn(">90 % : 3", ligne)
         self.assertEqual(image_perturbee.resume([]), "aucune seconde lue")
+
+
+class TestDistributionEncolleuse(unittest.TestCase):
+    """16/10 : % par minute de l'Encolleuse 2 sur une période connue."""
+    debut = datetime(2026, 10, 16, 1, 0)
+
+    def test_pourcentages_ignorent_les_minutes_a_trop_peu_de_secondes(self):
+        par_minute = {datetime(2026, 10, 16, 1, 1): (6, 60), datetime(2026, 10, 16, 1, 0): (3, 60),
+                      datetime(2026, 10, 16, 1, 2): (5, 12)}
+        self.assertEqual(distribution_encolleuse.pourcentages(par_minute), [5.0, 10.0])
+
+    def test_mesure_par_fenetres_de_5_minutes_et_trous_comptes_a_part(self):
+        appels = []
+
+        def lire(cam, t, f):
+            appels.append((t.minute, f.minute))
+            if t.minute == 5:
+                return None, "echec"                              # image détruite : non mesurée
+            if t.minute == 10:
+                return {}, distribution_encolleuse.dma.SANS_ENREGISTREMENT
+            return {t + timedelta(minutes=i): (3, 60) for i in range(f.minute - t.minute)}, "http"
+
+        valeurs, total = distribution_encolleuse.mesurer(
+            {}, self.debut, self.debut + timedelta(minutes=17), lire=lire)
+        self.assertEqual(appels, [(0, 5), (5, 10), (10, 15), (15, 17)])
+        self.assertEqual((len(valeurs), total), (7, 17))        # 5 + 2 minutes mesurées
+        self.assertEqual(set(valeurs), {5.0})
+
+    def test_resume_compte_les_minutes_au_dessus_des_seuils(self):
+        ligne = distribution_encolleuse.resume([0.0, 1.7, 8.3, 11.7, 13.3, 20.0], 6, "marche lente")
+        self.assertIn("marche lente : 6 min mesurées sur 6", ligne)
+        self.assertIn("max 20.0", ligne)
+        self.assertIn("> 8 % : 4", ligne)      # 8,3 / 11,7 / 13,3 / 20
+        self.assertIn("> 10 % : 3", ligne)
+        self.assertIn("> 12 % : 2", ligne)
+        self.assertIn("> 15 % : 1", ligne)
+        self.assertIn("aucune minute mesurée sur 30", distribution_encolleuse.resume([], 30))
 
 
 class TestAmplitudeParSeuil(unittest.TestCase):

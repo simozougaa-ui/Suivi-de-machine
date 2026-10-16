@@ -3119,3 +3119,69 @@ Elle affiche aussi le % de secondes et le % moyen de pixels en mouvement.
 À lancer à une heure de marche ET à une heure d'arrêt.
 
 Tests : outils_zones 45/45.
+
+## Caméra 10, étape 4 : branchée dans la détection (désactivée jusqu'aux tests de nuit)
+
+Zones retenues pour l'Encolleuse 2 (caméra 10) : la **zone 1**
+565,170,620,190 (sortie) et la **zone 2** 275,266,320,284 (bas gauche).
+L'ancienne zone du milieu est écartée : à 12 %, elle disait « arrêt »
+machine en marche.
+
+| 15/10 | Réalité | Zone 1 | Zone 2 |
+|---|---|---|---|
+| 19:50 | marche | 73,3 % | 81,7 % |
+| 07:00 | arrêt | 0,0 % | 0,0 % |
+| 11:00 | arrêt (confirmé par le patron) | 0,0 % | 0,0 % |
+| 13:15 | pause | 0,0 % | 0,0 % |
+
+Décisions (`detecter_marche_arret.py`, `CAMERAS_SUPPLEMENTAIRES`) :
+- **Lecture séparée :** téléchargement HTTP de la caméra 10, avec un
+  **curseur propre** à `machine-3`. Une panne de la caméra 10 ne bloque
+  jamais Bob B et Bob C, qui ne relisent jamais la caméra 10, et
+  inversement.
+- **Seulement si le DVR va bien :** la caméra 10 n'est lue qu'après une
+  lecture HTTP réussie de la caméra 15 dans le même passage. Ses échecs ne
+  touchent ni au disjoncteur ni au redémarrage du DVR : c'est la caméra 15
+  qui juge l'état du DVR.
+- **Méthode de Bob C** (amplitude sur 15 images, gris + flou 5×5, seuil 25,
+  5 % de la zone, règle des 40 %) : la seconde est en mouvement si **au
+  moins une** des deux zones bouge. Quelqu'un qui masque une zone ne masque
+  pas l'autre.
+- **Flou limité :** le flou ne porte que sur le rectangle qui englobe les
+  zones, élargi de 2 px. À l'intérieur des zones, c'est identique au flou
+  de l'image entière (vérifié par un test), et le Jetson évite de flouter
+  toute l'image.
+- **Coupure :** un trou d'enregistrement de la caméra 10 (vidéo récente de
+  la caméra 10 OK) est envoyé en « coupure ». Un fichier illisible est
+  retéléchargé une fois.
+- **Temps :** une fenêtre de la caméra 10 ne démarre que s'il reste 180 s
+  avant la limite de 480 s. Le rattrapage de la caméra 15 s'arrête à 200 s
+  (au lieu de 300) quand la caméra 10 est active, pour lui laisser du
+  temps.
+- **Remise à jour de 8 h et récupération manuelle :** `--repartir-a-jour`
+  remet aussi `machine-3` à jour. La récupération manuelle (`--date`) traite
+  aussi la caméra 10, morceau par morceau.
+- **Désactivée par défaut** (`active_par_defaut`) tant que la marche de
+  NUIT n'est pas validée, à la demande du patron (« fais des tests la nuit
+  aussi »). `MACHINE3_ACTIVE=1` ou `0` dans `.env` force l'un ou l'autre.
+  Après les tests de nuit, un commit passera le défaut à « 1 » : un simple
+  `git pull` l'activera.
+
+Côté application : `machine-3` s'appelle « Encolleuse 2 » (commit du même
+jour dans suivi-production-imprimerie).
+
+Tests : 135/135 (+12) :
+- configuration ; désactivée par défaut ;
+- une minute en marche puis une à l'arrêt ;
+- une seule zone qui bouge suffit ;
+- flou du rectangle identique au flou de l'image entière ;
+- lecture sur le canal 10 ;
+- trou d'enregistrement envoyé en coupure ;
+- échec sans toucher au disjoncteur ;
+- fichier illisible retenté une fois ;
+- curseur propre (jamais `machine-1` ni `machine-2`) ;
+- pas de fenêtre si le temps manque ;
+- pas de caméra 10 si le DVR est en difficulté ;
+- caméra 10 après la caméra 15 quand tout va bien.
+
+Non vérifié ici : le passage réel sur le Jetson, et la nuit.

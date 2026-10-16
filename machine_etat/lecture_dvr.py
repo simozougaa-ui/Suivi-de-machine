@@ -134,10 +134,12 @@ def _config_http():
     return ip, user, mdp, canal, port
 
 
-def construire_url_http(debut, fin):
+def construire_url_http(debut, fin, canal=None):
     """URL loadfile.cgi SANS identifiants (l'auth digest les fournit à part).
-    Renvoie (url, (user, mdp))."""
-    ip, user, mdp, canal, port = _config_http()
+    `canal` : caméra à lire (défaut CAMERA_CHANNEL du .env, la caméra 15 ;
+    16/10 : caméra 10 pour l'Encolleuse 2). Renvoie (url, (user, mdp))."""
+    ip, user, mdp, canal_env, port = _config_http()
+    canal = canal if canal is not None else canal_env
     url = (f"http://{ip}:{port}/cgi-bin/loadfile.cgi?action=startLoad"
            f"&channel={canal}&startTime={debut.strftime(FMT_DAHUA)}"
            f"&endTime={fin.strftime(FMT_DAHUA)}")
@@ -184,7 +186,7 @@ def _requests_get(url, auth, delai_connexion, delai_lecture):
 
 
 def telecharger_fenetre(debut, fin, delai_max=DELAI_TOTAL_S, tentatives=TENTATIVES_HTTP,
-                        session_get=None, delai_inactivite=DELAI_INACTIVITE_S):
+                        session_get=None, delai_inactivite=DELAI_INACTIVITE_S, canal=None):
     """Télécharge [debut, fin] vers un fichier temporaire (flux direct sur
     disque, jamais tout en mémoire). Renvoie (chemin, octets). Lève
     ErreurTelechargement en cas d'échec après `tentatives` essais.
@@ -196,7 +198,7 @@ def telecharger_fenetre(debut, fin, delai_max=DELAI_TOTAL_S, tentatives=TENTATIV
     if duree <= 0:
         raise ErreurTelechargement("fenêtre vide (fin <= début).")
     _verifier_espace(estimer_octets(duree))
-    url, auth = construire_url_http(debut, fin)
+    url, auth = construire_url_http(debut, fin, canal)
     secrets = _secrets_env()
 
     derniere = None
@@ -442,7 +444,7 @@ def noter_redemarrage_auto(maintenant=None):
 
 # --- Le DVR fonctionne-t-il sur la vidéo récente ? ---------------------------
 
-def video_recente_disponible(maintenant=None, session_get=None):
+def video_recente_disponible(maintenant=None, session_get=None, canal=None):
     """True si 30 s de vidéo RÉCENTE (finissant 5 min avant maintenant, même
     délai que la détection) se téléchargent. Sert à distinguer un trou
     d'enregistrement (DVR qui marche, vieille fenêtre absente) d'une panne
@@ -450,7 +452,8 @@ def video_recente_disponible(maintenant=None, session_get=None):
     from datetime import timedelta
     fin = (maintenant or datetime.now()).replace(second=0, microsecond=0) - timedelta(minutes=5)
     try:
-        chemin, _ = telecharger_fenetre(fin - timedelta(seconds=30), fin, session_get=session_get)
+        chemin, _ = telecharger_fenetre(fin - timedelta(seconds=30), fin, session_get=session_get,
+                                        canal=canal)
     except Exception as e:  # noqa: BLE001
         logger.warning("Vidéo récente non téléchargeable non plus (%s).", masquer(e))
         return False

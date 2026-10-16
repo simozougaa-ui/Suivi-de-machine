@@ -24,6 +24,7 @@ import unittest
 from datetime import datetime, timedelta
 from unittest import mock
 
+import cv2
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -42,6 +43,7 @@ GRIS_FOND = 100
 _DOSSIER_ETAT = None
 _DISJONCTEUR_ORIGINAL = None
 _REDEMARRAGES_ORIGINAL = None
+_ENV_MACHINE3 = None
 
 
 def setUpModule():
@@ -57,7 +59,15 @@ def setUpModule():
     dma.lecture_dvr.FICHIER_REDEMARRAGES = os.path.join(_DOSSIER_ETAT.name, "redemarrages_auto.json")
 
 
+    # Caméras supplémentaires coupées par défaut dans les tests (activées
+    # explicitement par les tests qui les concernent).
+    global _ENV_MACHINE3
+    _ENV_MACHINE3 = mock.patch.dict(os.environ, {"MACHINE3_ACTIVE": "0"})
+    _ENV_MACHINE3.start()
+
+
 def tearDownModule():
+    _ENV_MACHINE3.stop()
     dma.lecture_dvr.FICHIER_DISJONCTEUR = _DISJONCTEUR_ORIGINAL
     dma.lecture_dvr.FICHIER_REDEMARRAGES = _REDEMARRAGES_ORIGINAL
     _DOSSIER_ETAT.cleanup()
@@ -1885,6 +1895,167 @@ class TestFichierIllisibleRetente(_AvecHistoriqueVide):
                 self.assertLogs("machine_etat", level="WARNING"):
             dma.lire_analyser(self.debut, self.fin, "http", t_passage=time.monotonic())
         self.assertEqual(http.call_count, 1)
+
+
+# --- 16/10 : caméra 10, Encolleuse 2 -----------------------------------------
+
+class CaptureCouleur:
+    """Capture factice d'images couleur 360x700 ; `bouge(i)` dit si l'image i
+    a un « tapis » qui bouge dans la zone 1 de l'Encolleuse 2."""
+
+    def __init__(self, n, bouge):
+        self.n, self.i, self.bouge = n, 0, bouge
+
+    def read(self):
+        if self.i >= self.n:
+            return False, None
+        img = np.full((360, 700, 3), 100, dtype=np.uint8)
+        if self.bouge(self.i) and self.i % 2:
+            img[175:186, 570:615] = 220
+        self.i += 1
+        return True, img
+
+    def release(self):
+        pass
+
+
+class TestCamera10Encolleuse2(_AvecDisjoncteurPropre):
+    debut = datetime(2026, 10, 15, 19, 50)
+    cam = dict(dma.CAMERAS_SUPPLEMENTAIRES[0], machine_id="machine-3")
+
+    def test_configuration_et_desactivee_par_defaut(self):
+        self.assertEqual((self.cam["canal"], self.cam["nom"]), (10, "Encolleuse 2"))
+        with mock.patch.dict(os.environ, {"MACHINE3_ACTIVE": ""}):
+            self.assertEqual(dma.cameras_supplementaires_actives(), [])
+        with mock.patch.dict(os.environ, {"MACHINE3_ACTIVE": "1", "MACHINE3_ETAT_ID": "enc-2"}):
+            self.assertEqual([c["machine_id"] for c in dma.cameras_supplementaires_actives()], ["enc-2"])
+
+    def test_minutes_marche_puis_arret(self):
+        fin = self.debut + timedelta(minutes=2)
+        # 1re minute : le tapis bouge ; 2e : immobile.
+        cap = CaptureCouleur(2 * 60 * 15, lambda i: i < 60 * 15)
+        par_minute, index, total = dma.analyser_capture_zones(cap, self.debut, fin, self.cam["zones"])
+        self.assertEqual((index, total), (1800, 1800))
+        lignes = dma.classer(par_minute)
+        self.assertEqual([l["etat"] for l in lignes], ["marche", "arret"])
+
+    def test_une_seule_zone_qui_bouge_suffit(self):
+        cap = CaptureCouleur(60 * 15, lambda i: True)     # seule la zone 1 bouge
+        par_minute, _, _ = dma.analyser_capture_zones(
+            cap, self.debut, self.debut + timedelta(minutes=1), self.cam["zones"])
+        self.assertEqual(par_minute[self.debut], (60, 60))
+
+    def test_flou_du_rectangle_identique_au_flou_de_l_image_entiere(self):
+        rng = np.random.default_rng(3)
+        images = [rng.integers(0, 255, (360, 700, 3), dtype=np.uint8) for _ in range(15)]
+
+        class Cap:
+            def __init__(self):
+                self.i = 0
+
+            def read(self):
+                if self.i >= len(images):
+                    return False, None
+                self.i += 1
+                return True, images[self.i - 1]
+
+        par_minute, _, _ = dma.analyser_capture_zones(
+            Cap(), self.debut, self.debut + timedelta(seconds=1), self.cam["zones"])
+        floues = [cv2.GaussianBlur(cv2.cvtColor(im, cv2.COLOR_BGR2GRAY), (5, 5), 0) for im in images]
+        pile = np.stack(floues).astype(np.int16)
+        bouge = (pile.max(axis=0) - pile.min(axis=0)) > 25
+        attendu = any(bouge[z[1]:z[3], z[0]:z[2]].mean() > 0.05 for z in self.cam["zones"])
+        self.assertEqual(par_minute[self.debut], (1 if attendu else 0, 1))
+
+    def _lire(self, effet, recente=True):
+        with mock.patch.object(dma.lecture_dvr, "fenetre_telechargee", side_effect=effet) as dl, \
+                mock.patch.object(dma.lecture_dvr, "video_recente_disponible", return_value=recente), \
+                self.assertLogs("machine_etat", level="INFO") as journal:
+            r = dma.lire_camera_supplementaire(self.cam, self.debut, self.debut + timedelta(minutes=5))
+        return r, dl, "\n".join(journal.output)
+
+    def test_lit_bien_la_camera_10(self):
+        import contextlib
+
+        @contextlib.contextmanager
+        def ok(d, f, canal=None):
+            ok.canal = canal
+            yield "/tmp/x.dav", 1000
+
+        with mock.patch.object(dma.lecture_dvr, "ouvrir_fichier",
+                               return_value=(CaptureCouleur(4500, lambda i: True), "/tmp/x.dav")):
+            (par_minute, methode), _, _ = self._lire(ok)
+        self.assertEqual((methode, ok.canal), ("http", 10))
+        self.assertEqual(len(dma.classer(par_minute)), 5)
+
+    def test_trou_de_la_camera_10_envoye_en_coupure(self):
+        (par_minute, methode), _, journal = self._lire(
+            dma.lecture_dvr.ErreurPasDEnregistrement("HTTP 400"))
+        self.assertEqual((par_minute, methode), ({}, dma.SANS_ENREGISTREMENT))
+        self.assertIn("caméra 10", journal)
+
+    def test_echec_ne_touche_ni_au_disjoncteur_ni_au_dvr(self):
+        (par_minute, methode), dl, _ = self._lire(dma.lecture_dvr.ErreurTelechargement("Read timed out"))
+        self.assertEqual((par_minute, methode), (None, "echec"))
+        self.assertEqual(dl.call_count, 1)
+        self.assertIsNone(dma.lecture_dvr._lire_etat_disjoncteur())
+
+    def test_fichier_illisible_retente_une_fois(self):
+        (par_minute, methode), dl, _ = self._lire(dma.lecture_dvr.ErreurLectureFichier("illisible"))
+        self.assertEqual((methode, dl.call_count), ("echec", 2))
+
+    def test_passage_avec_son_propre_curseur_et_dans_le_temps(self):
+        t = datetime(2026, 10, 16, 9, 0)
+        fen = [(t, t + timedelta(minutes=5), timedelta(minutes=10)),
+               (t + timedelta(minutes=5), t + timedelta(minutes=10), timedelta(0))]
+        vus = []
+
+        def fenetre(machines):
+            vus.append(machines)
+            return fen.pop(0)
+
+        traiter = mock.MagicMock(return_value=(True, "http"))
+        with mock.patch.object(dma, "fenetre_a_analyser", side_effect=fenetre), \
+                mock.patch.object(dma, "traiter_camera_supplementaire", traiter), \
+                self.assertLogs("machine_etat", level="INFO"):
+            ok = dma.passage_cameras_supplementaires([self.cam], True, mock.Mock(), 0.0,
+                                                     horloge=lambda: 10.0)
+        self.assertTrue(ok)
+        self.assertEqual(vus, [["machine-3"], ["machine-3"]])    # jamais machine-1 / machine-2
+        self.assertEqual(traiter.call_count, 2)
+
+    def test_pas_de_fenetre_si_le_temps_manque(self):
+        fenetre = mock.MagicMock()
+        ok = dma.passage_cameras_supplementaires([self.cam], True, mock.Mock(), 0.0,
+                                                 horloge=lambda: 300.0)
+        self.assertTrue(ok)
+        fenetre.assert_not_called()
+
+    def test_pas_de_camera_10_si_le_dvr_est_en_difficulte(self):
+        supp = mock.MagicMock(return_value=True)
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(dma, "FICHIER_VERROU", os.path.join(d, "l")), \
+                mock.patch.dict(os.environ, {"LECTURE_DVR": "http", "MACHINE3_ACTIVE": "1"}), \
+                mock.patch.object(dma, "fenetre_a_analyser", return_value=(
+                    datetime(2026, 10, 16, 9, 0), datetime(2026, 10, 16, 9, 5), timedelta(0))), \
+                mock.patch.object(dma, "_traiter_une_fenetre", return_value=(True, 10, "secours-rtsp")), \
+                mock.patch.object(dma, "passage_cameras_supplementaires", supp), \
+                mock.patch.object(dma, "signaler_si_trop_long"):
+            dma.main([])
+        supp.assert_not_called()
+
+    def test_camera_10_apres_la_camera_15_si_tout_va_bien(self):
+        supp = mock.MagicMock(return_value=True)
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(dma, "FICHIER_VERROU", os.path.join(d, "l")), \
+                mock.patch.dict(os.environ, {"LECTURE_DVR": "http", "MACHINE3_ACTIVE": "1"}), \
+                mock.patch.object(dma, "fenetre_a_analyser", return_value=(
+                    datetime(2026, 10, 16, 9, 0), datetime(2026, 10, 16, 9, 5), timedelta(0))), \
+                mock.patch.object(dma, "_traiter_une_fenetre", return_value=(True, 10, "http")), \
+                mock.patch.object(dma, "passage_cameras_supplementaires", supp), \
+                mock.patch.object(dma, "signaler_si_trop_long"):
+            self.assertEqual(dma.main([]), 0)
+        supp.assert_called_once()
 
 
 class TestUnitesRedemarrageDVR(unittest.TestCase):

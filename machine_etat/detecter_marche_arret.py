@@ -136,7 +136,43 @@ FLOU_M2 = (5, 5)
 SEUIL_AMPLITUDE_M2 = 25
 SEUIL_FRACTION_M2 = 0.05
 
-# Commun aux deux machines.
+# --- Caméras supplémentaires (2026-10-16) ------------------------------------
+# Une machine par caméra AUTRE que la caméra 15, lue par TÉLÉCHARGEMENT HTTP
+# de sa propre caméra, avec son PROPRE curseur : une caméra supplémentaire en
+# panne ne bloque jamais Bob B et Bob C (et inversement). Méthode de la
+# machine 2 (pleine cadence, amplitude max-min sur 15 images, gris + flou
+# avant découpage) appliquée à une ou plusieurs zones : la seconde est « en
+# mouvement » si AU MOINS UNE zone dépasse seuil_fraction (une personne qui
+# masque une zone ne masque pas l'autre). Règle des 40 % pour la minute.
+#
+# Encolleuse 2, caméra 10 : deux petites zones sur sa ligne de transport,
+# choisies avec outils_zones/carte_mouvement.py (carte du 15/10 19:50), loin
+# des passages. Mesures de référence (60 s, % de secondes en mouvement) :
+#                       zone 1 (sortie)   zone 2 (bas gauche)
+#   marche  15/10 19:50     73,3 %             81,7 %
+#   arrêt   15/10 07:00      0,0 %              0,0 %
+#   arrêt   15/10 11:00      0,0 %              0,0 %   (arrêt confirmé)
+#   pause   15/10 13:15      0,0 %              0,0 %
+# LIMITE : une seule minute de marche mesurée (19:50) ; rien de nuit. Le
+# journal affiche le % de chaque minute pour réajuster sans deviner.
+# Désactivée par défaut (active_par_defaut) tant que la marche de NUIT n'est
+# pas validée ; MACHINE3_ACTIVE=1 / 0 dans .env force l'un ou l'autre ;
+# identifiant : MACHINE3_ETAT_ID (défaut machine-3, nommée « Encolleuse 2 »
+# dans l'application).
+CAMERAS_SUPPLEMENTAIRES = (
+    {"cle": "MACHINE3", "machine_id": "machine-3", "nom": "Encolleuse 2", "canal": 10,
+     "zones": ((565, 170, 620, 190), (275, 266, 320, 284)),
+     "flou": (5, 5), "seuil_amplitude": 25, "seuil_fraction": 0.05,
+     "active_par_defaut": "0"},
+)
+# Une fenêtre de caméra supplémentaire ne démarre que s'il reste de quoi la
+# finir (téléchargement au pire DELAI_TOTAL_S + analyse) avant TimeoutStartSec.
+DUREE_MAX_FENETRE_SUPP_S = 180
+# Quand des caméras supplémentaires sont actives, le rattrapage de la caméra
+# 15 s'arrête plus tôt pour leur laisser du temps dans le même passage.
+BUDGET_PRINCIPAL_AVEC_SUPP_S = 200
+
+# Commun à toutes les machines.
 SEUIL_MINUTE_POURCENT = 40.0
 
 # Le mainstream du DVR est confirmé à 15 fps (voir dvr_check/). La machine 1
@@ -350,6 +386,160 @@ def config_machine2():
     active = (os.getenv("MACHINE2_ACTIVE") or "1").strip() == "1"
     machine_id = (os.getenv("MACHINE2_ETAT_ID") or "machine-2").strip()
     return active, machine_id
+
+
+def cameras_supplementaires_actives():
+    """Caméras supplémentaires actives, lues à l'APPEL (comme
+    config_machine2) : <CLE>_ACTIVE (défaut 1) et <CLE>_ETAT_ID."""
+    actives = []
+    for cam in CAMERAS_SUPPLEMENTAIRES:
+        # Désactivée par défaut tant que la nuit n'est pas validée (16/10).
+        if (os.getenv(cam["cle"] + "_ACTIVE") or cam.get("active_par_defaut", "0")).strip() != "1":
+            continue
+        actives.append(dict(cam, machine_id=(os.getenv(cam["cle"] + "_ETAT_ID")
+                                             or cam["machine_id"]).strip()))
+    return actives
+
+
+def analyser_capture_zones(capture, debut, fin, zones, flou=(5, 5), seuil_amplitude=25,
+                           seuil_fraction=0.05, pas=None):
+    """Classe chaque seconde de [debut, fin) d'une caméra supplémentaire :
+    « en mouvement » si AU MOINS UNE des `zones` a plus de `seuil_fraction`
+    de pixels dont l'amplitude (max - min sur les `pas` images de la
+    seconde) dépasse `seuil_amplitude`. Même modèle de temps
+    qu'analyser_capture (image d'index i = debut + i/pas).
+
+    Pour ne pas flouter toute l'image (le Jetson lit aussi la caméra 15), le
+    gris + flou est fait sur le rectangle englobant les zones, élargi de la
+    demi-taille du flou : à l'intérieur des zones, le résultat est
+    identique à un flou de l'image entière (outils_zones/).
+
+    Returns: (par_minute {minute: (secondes_en_mouvement, secondes)},
+    images_lues, total_images)."""
+    duree = int((fin - debut).total_seconds())
+    if duree <= 0:
+        raise ValueError("Fenêtre vide : la fin doit être après le début.")
+    pas = pas or max(1, int(round(FPS_SUPPOSE)))
+    marge = max(flou) // 2
+    bx1 = max(0, min(z[0] for z in zones) - marge)
+    by1 = max(0, min(z[1] for z in zones) - marge)
+    bx2 = max(z[2] for z in zones) + marge
+    by2 = max(z[3] for z in zones) + marge
+    total_images = duree * pas
+    par_minute, tampon, index = {}, [], 0
+    while index < total_images:
+        ok, frame = capture.read()
+        if not ok:
+            break
+        morceau = cv2.cvtColor(frame[by1:by2, bx1:bx2], cv2.COLOR_BGR2GRAY)
+        tampon.append(cv2.GaussianBlur(morceau, flou, 0))
+        if len(tampon) == pas:
+            pile = np.stack(tampon, axis=0).astype(np.int16)
+            bouge = (pile.max(axis=0) - pile.min(axis=0)) > seuil_amplitude
+            en_mouvement = any(
+                bouge[z[1] - by1:z[3] - by1, z[0] - bx1:z[2] - bx1].mean() > seuil_fraction
+                for z in zones)
+            minute = (debut + timedelta(seconds=index // pas)).replace(second=0, microsecond=0)
+            avec, total = par_minute.get(minute, (0, 0))
+            par_minute[minute] = (avec + (1 if en_mouvement else 0), total + 1)
+            tampon = []
+        index += 1
+    return par_minute, index, total_images
+
+
+def lire_camera_supplementaire(cam, debut, fin):
+    """Télécharge et classe [debut, fin) de la caméra `cam`. Renvoie
+    (par_minute, methode) avec methode « http », SANS_ENREGISTREMENT
+    (par_minute = {} : le DVR n'a rien enregistré pour cette caméra alors que
+    sa vidéo récente se télécharge) ou « echec » (par_minute = None : rien
+    lu, curseur de CETTE machine inchangé). Ne touche jamais au disjoncteur
+    ni au redémarrage du DVR : c'est la caméra 15 qui juge l'état du DVR."""
+    for essai in (1, 2):
+        try:
+            with lecture_dvr.fenetre_telechargee(debut, fin, canal=cam["canal"]) as (chemin, octets):
+                capture, chemin_lu = lecture_dvr.ouvrir_fichier(chemin)
+                try:
+                    par_minute, index, total = analyser_capture_zones(
+                        capture, debut, fin, cam["zones"], cam["flou"],
+                        cam["seuil_amplitude"], cam["seuil_fraction"])
+                finally:
+                    capture.release()
+                    if chemin_lu != chemin:
+                        lecture_dvr._supprimer(chemin_lu)
+            if index == 0:
+                raise lecture_dvr.ErreurLectureFichier("aucune image décodée")
+            if index < total:
+                logger.warning("%s (caméra %s) : fichier plus court que la fenêtre (%d/%d images).",
+                               cam["nom"], cam["canal"], index, total)
+            logger.info("%s (caméra %s) : lecture HTTP %.1f Mo (%d/%d images).",
+                        cam["nom"], cam["canal"], octets / (1024 * 1024), index, total)
+            return par_minute, "http"
+        except lecture_dvr.ErreurLectureFichier as e:
+            if essai == 1:
+                logger.warning("%s (caméra %s) : fichier illisible (%s), nouveau téléchargement.",
+                               cam["nom"], cam["canal"], lecture_dvr.masquer(e))
+                continue
+            erreur = e
+        except lecture_dvr.ErreurPasDEnregistrement as e:
+            if lecture_dvr.video_recente_disponible(canal=cam["canal"]):
+                logger.error(
+                    "COUPURE D'ENREGISTREMENT : le DVR n'a rien enregistré pour la caméra %s "
+                    "(%s) de %s à %s (%s) alors que sa vidéo récente se télécharge. Minutes "
+                    "envoyées comme « coupure ».", cam["canal"], cam["nom"],
+                    debut.strftime("%d/%m %H:%M"), fin.strftime("%H:%M"), lecture_dvr.masquer(e))
+                return {}, SANS_ENREGISTREMENT
+            erreur = e
+        except lecture_dvr.ErreurTelechargement as e:
+            erreur = e
+        break
+    logger.error("%s (caméra %s) : lecture impossible de %s à %s (%s) — reprise au prochain "
+                 "passage (curseur de %s inchangé, Bob B / Bob C non concernés).",
+                 cam["nom"], cam["canal"], debut.strftime("%d/%m %H:%M"), fin.strftime("%H:%M"),
+                 lecture_dvr.masquer(erreur), cam["machine_id"])
+    return None, "echec"
+
+
+def traiter_camera_supplementaire(cam, debut, fin, mode_auto, args):
+    """Lit, classe, journalise et (sauf --sans-envoi) envoie une fenêtre
+    d'une caméra supplémentaire. Renvoie (succes, methode)."""
+    par_minute, methode = lire_camera_supplementaire(cam, debut, fin)
+    if par_minute is None:
+        return False, methode
+    lignes = lignes_coupure(debut, fin) if methode == SANS_ENREGISTREMENT else classer(par_minute)
+    logger.info("%s (%s) : %d minute(s) classée(s)", cam["nom"], cam["machine_id"], len(lignes))
+    for l in lignes:
+        logger.info("  %s  %s  %-7s  %5.1f %% de secondes en mouvement (%d s)",
+                    cam["machine_id"], l["minute"], l["etat"], l["pourcentage"],
+                    l["secondes_analysees"])
+    if args.sans_envoi:
+        return True, methode
+    url, jeton = config_api()
+    curseur = lire_curseur(cam["machine_id"]) if mode_auto else None
+    a_envoyer = [l for l in lignes
+                 if curseur is None or datetime.strptime(l["minute"], FORMAT_CURSEUR) >= curseur]
+    return traiter_envoi_machine(cam["machine_id"], a_envoyer, fin, url, jeton, mode_auto), methode
+
+
+def passage_cameras_supplementaires(cameras, mode_auto, args, t_passage, horloge=time.monotonic):
+    """Mode automatique : pour chaque caméra supplémentaire, enchaîne ses
+    fenêtres (à partir de SON curseur) tant qu'il reste le temps d'en finir
+    une avant TimeoutStartSec et que le budget de rattrapage n'est pas
+    épuisé. Renvoie True si tout s'est bien passé."""
+    limite = TIMEOUT_SERVICE_S - MARGE_FIN_PASSAGE_S - DUREE_MAX_FENETRE_SUPP_S
+    tout_ok = True
+    for cam in cameras:
+        while horloge() - t_passage < limite:
+            debut, fin, retard = fenetre_a_analyser([cam["machine_id"]])
+            if debut is None:
+                break
+            logger.info("%s (caméra %s) : analyse de %s à %s", cam["nom"], cam["canal"],
+                        debut.strftime("%Y-%m-%d %H:%M"), fin.strftime("%H:%M"))
+            ok, _ = traiter_camera_supplementaire(cam, debut, fin, mode_auto, args)
+            tout_ok = tout_ok and ok
+            if not ok or not retard or retard <= timedelta(0) \
+                    or horloge() - t_passage >= BUDGET_RATTRAPAGE_S:
+                break
+    return tout_ok
 
 
 def zone_grise(frame):
@@ -1107,7 +1297,7 @@ def main(argv=None):
         # Les DEUX machines, même si la machine 2 est désactivée : sinon son
         # vieux curseur ferait reculer la fenêtre partagée (minimum des
         # curseurs) le jour où on la réactive.
-        machines = [machine1_id, machine2_id]
+        machines = [machine1_id, machine2_id] + [c["machine_id"] for c in cameras_supplementaires_actives()]
         try:
             anciens = {m: lire_curseur(m) for m in machines}
             cible = repartir_a_jour(machines)
@@ -1175,6 +1365,11 @@ def _passage(ap, args, mode_auto, machine1_id, machine2_active, machine2_id, t_p
                     pause["jusqua"].strftime("%H:%M") if pause else "quelques minutes")
                 return 1
             tout_ok = tout_ok and ok
+            if methode == "http":
+                for cam in cameras_supplementaires_actives():
+                    ok_cam, _ = traiter_camera_supplementaire(cam, morceau, fin_morceau,
+                                                              mode_auto, args)
+                    tout_ok = tout_ok and ok_cam
             morceau = fin_morceau
         signaler_si_trop_long(time.monotonic() - t_passage, debut, fin)
         return 0 if tout_ok else 1
@@ -1182,9 +1377,14 @@ def _passage(ap, args, mode_auto, machine1_id, machine2_active, machine2_id, t_p
         ap.error("--date, --debut et --fin vont ensemble.")
 
     machines_actives = [machine1_id] + ([machine2_id] if machine2_active else [])
-    budget = BUDGET_RATTRAPAGE_S if methode == "http" else 0
+    # Caméras supplémentaires : lecture HTTP seulement (voir
+    # CAMERAS_SUPPLEMENTAIRES).
+    cameras = cameras_supplementaires_actives() if methode == "http" else []
+    budget = (BUDGET_PRINCIPAL_AVEC_SUPP_S if cameras else BUDGET_RATTRAPAGE_S) \
+        if methode == "http" else 0
     premier_debut = dernier_fin = None
     code = 0
+    dvr_ok = True
     while True:
         debut, fin, retard_restant = fenetre_a_analyser(machines_actives)
         if debut is None:
@@ -1194,6 +1394,8 @@ def _passage(ap, args, mode_auto, machine1_id, machine2_active, machine2_id, t_p
         ok, _, methode_utilisee = _traiter_une_fenetre(
             debut, fin, methode, mode_auto, machine1_id, machine2_active, machine2_id,
             args, t_passage=t_passage)
+        if methode_utilisee not in ("http", SANS_ENREGISTREMENT):
+            dvr_ok = False      # DVR en difficulté : pas de caméra supplémentaire
         if methode_utilisee in RIEN_LU:
             # Rien lu : fenêtre reprise au prochain passage. L'attente du
             # retour du DVR après un redémarrage automatique n'est pas un échec.
@@ -1223,6 +1425,9 @@ def _passage(ap, args, mode_auto, machine1_id, machine2_active, machine2_id, t_p
         # dernière fenêtre (sinon un rattrapage de 10 fenêtres en 300 s
         # serait signalé à tort comme « plus long que la fenêtre »).
         signaler_si_trop_long(time.monotonic() - t_passage, premier_debut, dernier_fin)
+    if cameras and dvr_ok:
+        if not passage_cameras_supplementaires(cameras, mode_auto, args, t_passage):
+            code = code or 1
     return code
 
 

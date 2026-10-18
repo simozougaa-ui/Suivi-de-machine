@@ -367,6 +367,12 @@ class TestDistributionEncolleuse(unittest.TestCase):
         self.assertEqual((len(valeurs), total), (7, 17))        # 5 + 2 minutes mesurées
         self.assertEqual(set(valeurs), {5.0})
 
+    def test_sequence_minute_par_minute_avec_trous(self):
+        par = {self.debut: 3.3, self.debut + timedelta(minutes=1): 21.7,
+               self.debut + timedelta(minutes=3): 0.0}
+        self.assertEqual(distribution_encolleuse.sequence(par, self.debut, self.debut + timedelta(minutes=5)),
+                         "3 22 - 0 -")
+
     def test_resume_compte_les_minutes_au_dessus_des_seuils(self):
         ligne = distribution_encolleuse.resume([0.0, 1.7, 8.3, 11.7, 13.3, 20.0], 6, "marche lente")
         self.assertIn("marche lente : 6 min mesurées sur 6", ligne)

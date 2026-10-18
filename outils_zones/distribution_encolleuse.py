@@ -40,18 +40,41 @@ def pourcentages(par_minute, min_secondes=MIN_SECONDES):
             if total >= min_secondes]
 
 
-def mesurer(cam, debut, fin, lire=dma.lire_camera_supplementaire, fenetre_minutes=5):
+def mesurer_minutes(cam, debut, fin, lire=dma.lire_camera_supplementaire, fenetre_minutes=5):
     """Lit [debut, fin) par fenêtres de `fenetre_minutes`. Renvoie
-    (liste des % par minute mesurée, nombre de minutes de la période)."""
-    valeurs = []
+    {minute: % de secondes en mouvement} pour les minutes mesurées (les minutes
+    à image abîmée ou sans enregistrement sont absentes)."""
+    par = {}
     t = debut
     while t < fin:
         f = min(fin, t + timedelta(minutes=fenetre_minutes))
         par_minute, methode = lire(cam, t, f)
         if par_minute and methode != dma.SANS_ENREGISTREMENT:
-            valeurs += pourcentages(par_minute)
+            for minute, (avec, total) in par_minute.items():
+                if total >= MIN_SECONDES:
+                    par[minute] = 100.0 * avec / total
         t = f
-    return valeurs, int((fin - debut).total_seconds() // 60)
+    return par
+
+
+def mesurer(cam, debut, fin, lire=dma.lire_camera_supplementaire, fenetre_minutes=5):
+    """Comme mesurer_minutes, mais renvoie (liste des % par minute mesurée, dans
+    l'ordre, nombre de minutes de la période)."""
+    par = mesurer_minutes(cam, debut, fin, lire, fenetre_minutes)
+    return [par[m] for m in sorted(par)], int((fin - debut).total_seconds() // 60)
+
+
+def sequence(par, debut, fin):
+    """Les % minute par minute, dans l'ordre, arrondis à l'entier ; « - » pour
+    une minute non mesurée. Montre si les minutes faibles d'une machine qui
+    tourne par à-coups sont isolées entre des minutes fortes."""
+    t = debut.replace(second=0, microsecond=0)
+    sortie = []
+    while t < fin:
+        v = par.get(t)
+        sortie.append("-" if v is None else f"{v:.0f}")
+        t += timedelta(minutes=1)
+    return " ".join(sortie)
 
 
 def resume(valeurs, total_minutes, etiquette=""):
@@ -71,6 +94,8 @@ def main():
     parser.add_argument("debut", help="HH:MM")
     parser.add_argument("fin", help="HH:MM (même journée)")
     parser.add_argument("--etiquette", default="", help="nom de la période (marche, pause...)")
+    parser.add_argument("--sequence", action="store_true",
+                        help="affiche aussi le % de chaque minute, dans l'ordre (- = non mesurée)")
     args = parser.parse_args()
     try:
         jour = datetime.strptime(args.date, "%Y-%m-%d").date()
@@ -81,8 +106,12 @@ def main():
     if fin <= debut:
         parser.error("la fin doit être après le début (même journée).")
     cam = dma.CAMERAS_SUPPLEMENTAIRES[0]
-    valeurs, total = mesurer(cam, debut, fin)
+    par = mesurer_minutes(cam, debut, fin)
+    valeurs = [par[m] for m in sorted(par)]
+    total = int((fin - debut).total_seconds() // 60)
     print(f"{debut:%d/%m %H:%M}→{fin:%H:%M} " + resume(valeurs, total, args.etiquette))
+    if args.sequence:
+        print("  minute par minute : " + sequence(par, debut, fin))
 
 
 if __name__ == "__main__":

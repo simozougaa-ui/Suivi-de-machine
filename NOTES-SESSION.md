@@ -3513,3 +3513,38 @@ de marche, à décider avec le patron (cela cacherait aussi de vrais petits
 arrêts).
 
 Tests : outils_zones 60/60.
+
+### Résultat de la distribution (mesure du 16/10 au soir, lue le 18/10)
+
+`distribution_encolleuse.py`, minutes mesurées / minutes de la période, puis
+nombre de minutes au-dessus de 8, 10, 12 et 15 % :
+
+| Période | Mesurées | >8 | >10 | >12 | >15 |
+|---|---|---|---|---|---|
+| ARRET pause nuit 16/10 01:00-01:30 | 30/30 | 9 | 2 | 1 | 1 |
+| ARRET matin 16/10 06:10-07:10 | 60/60 | 0 | 0 | 0 | 0 |
+| ARRET pause midi 15/10 12:55-13:35 | 34/40 | 2 | 2 | 2 | 1 |
+| MARCHE soir 15/10 19:40-20:10 | 26/30 | 16 | 16 | 16 | 16 |
+| MARCHE nuit lente 15/10 22:20-22:50 | 26/30 | 13 | 10 | 8 | 6 |
+| MARCHE nuit 16/10 03:50-04:20 | 30/30 | 28 | 23 | 23 | 22 |
+
+Sur 124 minutes d'arrêt et 82 de marche :
+- seuil 12 % (actuel) : 3 arrêts comptés en marche ;
+- seuil 10 % : 4 arrêts en marche, 2 minutes de marche récupérées : gain
+  nul ;
+- seuil 8 % : 11 arrêts en marche pour 5 minutes de marche de plus : pire.
+
+Décision : le seuil reste à 12 %. La pause de nuit a une médiane de 6,7 % et la
+marche lente de 22:20 une médiane de 7,5 % : un seuil seul ne les sépare pas
+(le patron l'avait prévu). Limites : les périodes « marche » ne sont pas
+homogènes (la marche du soir a 10 minutes sous 8 %, peut-être de vrais petits
+arrêts) ; les 3 arrêts au-dessus de 12 % sont sans doute aux bords des pauses
+(12:55, 13:30, 01:00, 01:30).
+
+Suite : afficher l'ORDRE des minutes (`--sequence`) pour voir si les minutes
+faibles de la marche sont isolées entre des minutes fortes. Si oui, une règle
+« un arrêt de 1 à 2 minutes entre deux minutes de marche compte comme marche »
+serait possible, mais cacherait aussi de vrais petits arrêts : décision à
+prendre avec le patron sur les chiffres.
+
+Tests : outils_zones 61/61.

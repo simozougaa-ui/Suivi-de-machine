@@ -3548,3 +3548,35 @@ serait possible, mais cacherait aussi de vrais petits arrêts : décision à
 prendre avec le patron sur les chiffres.
 
 Tests : outils_zones 61/61.
+
+---
+
+# 20/10 : une fiche par machine dans l'application, identifiants réservés
+
+L'application (suivi-production-imprimerie, commit du 20/10) a maintenant
+une fiche pour chacune des 13 machines de l'atelier, dans l'écran « État de
+la machine ». Pour brancher une nouvelle caméra, utiliser l'identifiant
+RÉSERVÉ de la machine (machine_id envoyé par le Jetson), sinon ses minutes
+iraient dans « Autres caméras » :
+
+| Machine | Identifiant | Caméra |
+|---|---|---|
+| Bobineuse | bobineuse | à indiquer |
+| Massicot | massicot | à indiquer |
+| Speedmaster | speedmaster | à indiquer |
+| Roland 1 | roland-1 | à indiquer |
+| Roland 2 | roland-2 | à indiquer |
+| Bob A | bob-a | à indiquer |
+| Bob B | machine-1 | 15 (actif) |
+| Bob C | machine-2 | 15 (actif) |
+| Bob D | bob-d | à indiquer |
+| Encolleuse 1 | encolleuse-1 | à indiquer |
+| Encolleuse 2 | machine-3 | 10 (actif) |
+| Fardeuse 1 | fardeuse-1 | à indiquer |
+| Fardeuse 2 | fardeuse-2 | à indiquer |
+
+Ajouter une machine côté Jetson : une entrée de plus dans
+`CAMERAS_SUPPLEMENTAIRES` (clé MACHINEn, machine_id réservé, canal, zones,
+seuils), après les étapes outils_zones (quadrillage, carte de mouvement,
+comparaison marche / arrêt, distribution jour et nuit). Côté application,
+passer la fiche à `statut: 'actif'` avec la caméra et le réglage.
